@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use llm386_core::{
     ChatMessage as RustChatMessage, ChatRole, ContextBlock as RustBlock,
     ModelProfile as RustModelProfile, OmittedBlock as RustOmitted, PagePlan as RustPagePlan,
-    Provenance as RustProvenance,
+    Provenance as RustProvenance, TraceRecord as RustTraceRecord,
 };
 
 #[pyclass(frozen, get_all, skip_from_py_object)]
@@ -212,6 +212,49 @@ impl ModelProfile {
             tokenizer: p.tokenizer.as_str().to_string(),
             supports_system_role: p.supports_system_role,
             supports_tools: p.supports_tools,
+        }
+    }
+}
+
+#[pyclass(frozen, get_all, skip_from_py_object)]
+#[derive(Clone)]
+pub struct TraceRecord {
+    pub call_id: String,
+    pub session: String,
+    pub model: String,
+    pub plan: PagePlan,
+    pub prompt_tokens: u32,
+    pub prompt_hash: String,
+    pub started_at: u64,
+    pub duration_ms: u32,
+}
+
+#[pymethods]
+impl TraceRecord {
+    fn __repr__(&self) -> String {
+        format!(
+            "TraceRecord(call_id={:?}, session={:?}, model={:?}, prompt_tokens={}, duration_ms={})",
+            self.call_id, self.session, self.model, self.prompt_tokens, self.duration_ms,
+        )
+    }
+}
+
+impl TraceRecord {
+    pub fn from_rust(t: RustTraceRecord) -> Self {
+        let hash_hex = t.prompt_hash.0.iter().fold(String::with_capacity(64), |mut acc, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "{byte:02x}");
+            acc
+        });
+        Self {
+            call_id: format!("{}", t.call_id),
+            session: format!("{}", t.session),
+            model: t.model,
+            plan: PagePlan::from_rust(t.plan),
+            prompt_tokens: t.prompt_tokens.0,
+            prompt_hash: hash_hex,
+            started_at: t.started_at.0,
+            duration_ms: t.duration_ms,
         }
     }
 }

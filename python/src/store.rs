@@ -14,7 +14,7 @@ use llm386_compress_anthropic::AnthropicSummarizer;
 use llm386_core::{
     BlockId, BlockKind, BlockStore, CallId, ContentHash, ContextBlock as RustBlock,
     ModelRegistry, Packer, PageRequest, Pager, Provenance, SessionId, Summarizer, Timestamp,
-    TokenCounts, Tokenizer, TraceRecord, TraceSink, default_registry,
+    TokenCounts, Tokenizer, TraceRecord as RustTraceRecord, TraceSink, default_registry,
 };
 use llm386_packer::SimplePacker;
 use llm386_pager::GreedyPager;
@@ -22,7 +22,7 @@ use llm386_store_lmdb::{LmdbStore, StoreConfig};
 use llm386_tokenizer::{TokenizerRegistry, default_registry as default_tokenizers};
 use llm386_trace::LmdbTraceSink;
 
-use crate::types::{ChatMessage, ContextBlock, PackResult, PagePlan};
+use crate::types::{ChatMessage, ContextBlock, PackResult, PagePlan, TraceRecord};
 
 create_exception!(llm386, LLM386Error, PyException);
 
@@ -344,7 +344,7 @@ fn record_trace(
     let sink = LmdbTraceSink::open(path)
         .map_err(|e| LLM386Error::new_err(format!("open trace: {e}")))?;
     let call_id = new_call_id();
-    sink.record(TraceRecord {
+    sink.record(RustTraceRecord {
         call_id,
         session,
         model: model.to_string(),
@@ -356,6 +356,41 @@ fn record_trace(
     })
     .map_err(|e| LLM386Error::new_err(format!("record trace: {e}")))?;
     Ok(format!("{call_id}"))
+}
+
+/// Read-only wrapper around an LMDB trace store. Pair with
+/// `Store.pack(trace="./traces")` to inspect a recorded trace.
+#[pyclass]
+pub struct Trace {
+    sink: LmdbTraceSink,
+}
+
+#[pymethods]
+impl Trace {
+    /// Open (or create) a trace store at `path`.
+    #[new]
+    fn new(path: PathBuf) -> PyResult<Self> {
+        let sink = LmdbTraceSink::open(&path)
+            .map_err(|e| LLM386Error::new_err(format!("open trace store: {e}")))?;
+        Ok(Self { sink })
+    }
+
+    /// Fetch a trace record by call id.
+    fn show(&self, call_id: &str) -> PyResult<TraceRecord> {
+        let id = parse_call_id(call_id)?;
+        let record = self
+            .sink
+            .fetch(id)
+            .map_err(|e| LLM386Error::new_err(format!("fetch trace: {e}")))?
+            .ok_or_else(|| LLM386Error::new_err(format!("no trace for {call_id}")))?;
+        Ok(TraceRecord::from_rust(record))
+    }
+}
+
+fn parse_call_id(s: &str) -> PyResult<CallId> {
+    let n = u128::from_str_radix(s, 16)
+        .map_err(|e| LLM386Error::new_err(format!("invalid call id `{s}`: {e}")))?;
+    Ok(CallId(n))
 }
 
 fn parse_kind(s: &str) -> PyResult<BlockKind> {

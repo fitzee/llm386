@@ -76,14 +76,21 @@ def turn(session_id: int, user_input: str) -> str:
 ## Trace + replay
 
 ```python
+from llm386 import Store, Trace
+
+store = Store("./store")
+
 result = store.pack(session=1, model="gpt-4o", task="...",
                     chat=True, trace="./traces")
 
 if result.trace_id:
-    print(f"recorded trace {result.trace_id}")
+    record = Trace("./traces").show(result.trace_id)
+    print(f"{record.model} call took {record.duration_ms} ms, "
+          f"{record.prompt_tokens} prompt tokens, "
+          f"{len(record.plan.selected)} blocks selected")
 ```
 
-Inspecting a recorded trace from Python is on the roadmap. For now, use the CLI: `llm386 trace show --store ./traces <call-id>`.
+`TraceRecord` exposes the full record: `call_id`, `session`, `model`, `plan` (a `PagePlan`), `prompt_tokens`, `prompt_hash`, `started_at` (ms since epoch), and `duration_ms`.
 
 ## Custom profiles, tokenizers, retrievers
 

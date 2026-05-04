@@ -11,12 +11,16 @@ use pyo3::prelude::*;
 mod store;
 mod types;
 
-use store::{LLM386Error, Store};
-use types::{ChatMessage, ContextBlock, ModelProfile, OmittedBlock, PackResult, PagePlan, Provenance};
+use store::{LLM386Error, Store, Trace};
+use types::{
+    ChatMessage, ContextBlock, ModelProfile, OmittedBlock, PackResult, PagePlan, Provenance,
+    TraceRecord,
+};
 
 #[pymodule]
 fn llm386(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Store>()?;
+    m.add_class::<Trace>()?;
     m.add_class::<ContextBlock>()?;
     m.add_class::<Provenance>()?;
     m.add_class::<OmittedBlock>()?;
@@ -24,6 +28,7 @@ fn llm386(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ChatMessage>()?;
     m.add_class::<PackResult>()?;
     m.add_class::<ModelProfile>()?;
+    m.add_class::<TraceRecord>()?;
     m.add("LLM386Error", py.get_type::<LLM386Error>())?;
     m.add_function(wrap_pyfunction!(list_models, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

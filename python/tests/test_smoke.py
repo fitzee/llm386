@@ -86,6 +86,32 @@ def test_pack_with_trace_records_id(store, tmp_path):
     assert len(result.trace_id) == 32
 
 
+def test_trace_show_roundtrips_record(store, tmp_path):
+    from llm386 import Trace
+
+    store.put(session=42, kind="user-message", body="x")
+    trace_dir = str(tmp_path / "traces")
+    pack_result = store.pack(
+        session=42, model="gpt-4o", task="reply", chat=True, trace=trace_dir
+    )
+    trace = Trace(trace_dir)
+    record = trace.show(pack_result.trace_id)
+    assert record.call_id == pack_result.trace_id
+    assert record.session.endswith("2a")  # 42 in hex
+    assert record.model == "gpt-4o"
+    assert record.prompt_tokens > 0
+    assert len(record.prompt_hash) == 64
+    assert isinstance(record.started_at, int)
+
+
+def test_trace_show_unknown_call_raises(tmp_path):
+    from llm386 import LLM386Error, Trace
+
+    trace = Trace(str(tmp_path / "empty-traces"))
+    with pytest.raises(LLM386Error):
+        trace.show("0" * 32)
+
+
 def test_summarize_truncating_returns_text(store):
     for i in range(3):
         store.put(session=1, kind="fact", body=f"fact number {i}")
