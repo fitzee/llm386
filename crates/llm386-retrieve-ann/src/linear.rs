@@ -7,6 +7,8 @@ use std::sync::Arc;
 use llm386_core::{BlockStore, Embedder, RetrievalCandidate, RetrievalError, Retriever, SessionId};
 use parking_lot::RwLock;
 
+use crate::cache::EmbeddingCache;
+
 /// In-memory cosine-similarity ANN retriever.
 ///
 /// On each `retrieve` call: embeds the task, ensures every session
@@ -23,6 +25,7 @@ pub struct LinearAnnRetriever<S: BlockStore, E: Embedder> {
     store: Arc<S>,
     embedder: Arc<E>,
     cache: RwLock<HashMap<llm386_core::BlockId, Vec<f32>>>,
+    persistent: Option<Arc<EmbeddingCache>>,
 }
 
 impl<S: BlockStore, E: Embedder> LinearAnnRetriever<S, E> {
@@ -31,16 +34,27 @@ impl<S: BlockStore, E: Embedder> LinearAnnRetriever<S, E> {
             store,
             embedder,
             cache: RwLock::new(HashMap::new()),
+            persistent: None,
         }
     }
 
-    /// Drop every cached embedding. Use after re-indexing or when
-    /// the embedder model changes.
+    /// Attach a persistent [`EmbeddingCache`]. Lookups consult it
+    /// when the in-memory cache misses; new embeddings are written
+    /// to both. Call once after construction; takes effect on the
+    /// next `retrieve`.
+    #[must_use]
+    pub fn with_persistent_cache(mut self, cache: Arc<EmbeddingCache>) -> Self {
+        self.persistent = Some(cache);
+        self
+    }
+
+    /// Drop every in-memory cached embedding. The persistent cache
+    /// (if attached) is left intact.
     pub fn clear_cache(&self) {
         self.cache.write().clear();
     }
 
-    /// Number of cached embeddings.
+    /// Number of in-memory cached embeddings.
     #[must_use]
     pub fn cached_len(&self) -> usize {
         self.cache.read().len()
@@ -93,11 +107,16 @@ impl<S: BlockStore + 'static, E: Embedder + 'static> Retriever for LinearAnnRetr
                 .collect()
         };
 
-        // Load + embed missing blocks in one batch call (the
-        // embedder may have a more efficient batch path).
+        // Load missing blocks. Try the persistent cache (L2) first
+        // before paying for an embed call; whatever's left needs
+        // the live embedder. Newly embedded vectors go into both
+        // caches.
         if !needs_embed.is_empty() {
             let mut texts: Vec<String> = Vec::with_capacity(needs_embed.len());
             let mut ok_ids: Vec<llm386_core::BlockId> = Vec::with_capacity(needs_embed.len());
+            let mut hashes: Vec<llm386_core::ContentHash> = Vec::with_capacity(needs_embed.len());
+            let embedder_name = self.embedder.name();
+            // L2 hits go straight into the in-memory cache.
             for &id in &needs_embed {
                 let block = self
                     .store
@@ -106,21 +125,35 @@ impl<S: BlockStore + 'static, E: Embedder + 'static> Retriever for LinearAnnRetr
                 let Some(block) = block else {
                     continue;
                 };
+                if let Some(persistent) = &self.persistent
+                    && let Some(vec) = persistent
+                        .get(embedder_name, &block.hash)
+                        .map_err(|e| RetrievalError::Failed(format!("cache get: {e}")))?
+                {
+                    self.cache.write().insert(id, vec);
+                    continue;
+                }
                 let Ok(text) = std::str::from_utf8(&block.bytes) else {
                     continue;
                 };
                 texts.push(text.to_owned());
                 ok_ids.push(id);
+                hashes.push(block.hash);
             }
+            // Embed everything that the L2 cache (or no L2) didn't cover.
             if !texts.is_empty() {
                 let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
                 let vecs = self
                     .embedder
                     .embed_batch(&refs)
                     .map_err(|e| RetrievalError::Failed(format!("embed batch: {e}")))?;
-                let mut cache = self.cache.write();
-                for (id, vec) in ok_ids.into_iter().zip(vecs) {
-                    cache.insert(id, vec);
+                for ((id, hash), vec) in ok_ids.into_iter().zip(hashes).zip(vecs) {
+                    if let Some(persistent) = &self.persistent {
+                        persistent
+                            .put(embedder_name, &hash, &vec)
+                            .map_err(|e| RetrievalError::Failed(format!("cache put: {e}")))?;
+                    }
+                    self.cache.write().insert(id, vec);
                 }
             }
         }
@@ -263,6 +296,58 @@ mod tests {
         // 'b' → beta.
         let cands = r.retrieve(s, "blocks here", usize::MAX).unwrap();
         assert_eq!(cands[0].block_id, b_block);
+    }
+
+    #[test]
+    fn persistent_cache_is_consulted_before_embedder() {
+        use crate::EmbeddingCache;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingEmbedder {
+            calls: Arc<AtomicUsize>,
+        }
+        impl Embedder for CountingEmbedder {
+            fn name(&self) -> &'static str {
+                "counting"
+            }
+            fn dimensions(&self) -> usize {
+                4
+            }
+            fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedderError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![1.0, 0.0, 0.0, 0.0])
+            }
+        }
+
+        let (store, _dir) = open_tmp();
+        let s = SessionId(1);
+        let block_id = put(&store, s, b"alpha block", 1);
+
+        let cache_dir = TempDir::new().unwrap();
+        let cache = Arc::new(EmbeddingCache::open(cache_dir.path()).unwrap());
+
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        // First retriever instance — embeds and writes to L2.
+        let embedder1 = Arc::new(CountingEmbedder {
+            calls: calls.clone(),
+        });
+        let r1 =
+            LinearAnnRetriever::new(store.clone(), embedder1).with_persistent_cache(cache.clone());
+        let cands = r1.retrieve(s, "alpha", usize::MAX).unwrap();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].block_id, block_id);
+        assert_eq!(calls.load(Ordering::SeqCst), 2); // task + block
+
+        // Second instance with empty in-memory cache should hit L2
+        // and only embed the task — not the block.
+        let embedder2 = Arc::new(CountingEmbedder {
+            calls: calls.clone(),
+        });
+        let r2 = LinearAnnRetriever::new(store, embedder2).with_persistent_cache(cache);
+        let cands = r2.retrieve(s, "alpha", usize::MAX).unwrap();
+        assert_eq!(cands.len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 3); // +1 task only
     }
 
     #[test]

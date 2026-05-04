@@ -17,6 +17,8 @@ parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+heed = "0.22"
+thiserror = { workspace = true }
 
 [dev-dependencies]
 llm386-store-lmdb = { workspace = true }
