@@ -1,5 +1,18 @@
 //! `llm386` — command-line interface for the LLM386 runtime.
 
-fn main() {
-    println!("llm386 {}", env!("CARGO_PKG_VERSION"));
+mod cli;
+mod commands;
+
+use clap::Parser;
+use tracing_subscriber::EnvFilter;
+
+fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+    let args = cli::Cli::parse();
+    commands::dispatch(args)
 }
