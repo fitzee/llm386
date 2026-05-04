@@ -6,6 +6,7 @@ use crate::ids::BlockId;
 use crate::page::{PagePlan, PageRequest};
 use crate::retriever::RetrievalError;
 use crate::store::StoreError;
+use crate::tokenizer::{TokenizerError, TokenizerId};
 
 pub trait Pager: Send + Sync {
     fn page(&self, request: PageRequest) -> Result<PagePlan, PagerError>;
@@ -17,6 +18,13 @@ pub enum PagerError {
     RequiredBlockMissing(BlockId),
     #[error("required blocks would exceed input budget")]
     RequiredOverBudget,
+    #[error("pager tokenizer {pager} does not match model tokenizer {model}")]
+    TokenizerMismatch {
+        pager: TokenizerId,
+        model: TokenizerId,
+    },
+    #[error(transparent)]
+    Tokenizer(#[from] TokenizerError),
     #[error(transparent)]
     Retrieval(#[from] RetrievalError),
     #[error(transparent)]

@@ -12,3 +12,10 @@ description = "Working-set selection (paging) for LLM386."
 workspace = true
 
 [dependencies]
+llm386-core = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+llm386-store-lmdb = { workspace = true }
+llm386-tokenizer = { workspace = true }
+tempfile = { workspace = true }
