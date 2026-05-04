@@ -78,22 +78,46 @@ impl<S: BlockStore + 'static> Retriever for SessionRetriever<S> {
     }
 }
 
-/// Scores every session block by normalized recency (most-recent
-/// block → 1.0, oldest → 0.0). Uses the `BlockId`'s embedded
-/// timestamp; no extra storage required.
+/// Scores every session block by recency. Uses the `BlockId`'s
+/// embedded timestamp; no extra storage required.
+///
+/// Two scoring modes:
+/// - **Linear** (default): newest block → 1.0, oldest → 0.0,
+///   straight-line normalization across the session's timestamp
+///   span.
+/// - **Half-life decay** (via [`Self::with_half_life`]): score =
+///   `2^(-(newest_ts − ts) / half_life)`. The newest block always
+///   scores 1.0, and a block exactly one half-life older scores
+///   0.5. Useful when very old blocks should not contribute to
+///   ranking at all even if there are no newer ones.
 pub struct RecencyRetriever<S: BlockStore> {
     store: Arc<S>,
+    half_life_secs: Option<f32>,
 }
 
 impl<S: BlockStore> RecencyRetriever<S> {
     pub fn new(store: Arc<S>) -> Self {
-        Self { store }
+        Self {
+            store,
+            half_life_secs: None,
+        }
+    }
+
+    /// Switch to exponential decay scoring with the given half-life
+    /// (in seconds). A block one half-life older than the newest
+    /// scores 0.5; two half-lives older scores 0.25; etc.
+    #[must_use]
+    pub fn with_half_life(mut self, half_life_secs: f32) -> Self {
+        self.half_life_secs = Some(half_life_secs.max(0.0));
+        self
     }
 }
 
 impl<S: BlockStore> fmt::Debug for RecencyRetriever<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RecencyRetriever").finish_non_exhaustive()
+        f.debug_struct("RecencyRetriever")
+            .field("half_life_secs", &self.half_life_secs)
+            .finish_non_exhaustive()
     }
 }
 
@@ -124,15 +148,24 @@ impl<S: BlockStore + 'static> Retriever for RecencyRetriever<S> {
             min_ts = min_ts.min(ts);
             max_ts = max_ts.max(ts);
         }
-        let span = max_ts.saturating_sub(min_ts).max(1) as f32;
 
         let mut cands: Vec<RetrievalCandidate> = ids
             .into_iter()
             .map(|id| {
-                let recency = (id.timestamp_ms().saturating_sub(min_ts) as f32) / span;
+                let ts = id.timestamp_ms();
+                let score = if let Some(h_secs) = self.half_life_secs {
+                    // Exponential decay relative to the newest block.
+                    let age_ms = max_ts.saturating_sub(ts) as f32;
+                    let half_life_ms = (h_secs * 1000.0).max(1.0);
+                    (-(age_ms / half_life_ms)).exp2()
+                } else {
+                    // Linear normalization across the session span.
+                    let span = max_ts.saturating_sub(min_ts).max(1) as f32;
+                    (ts.saturating_sub(min_ts) as f32) / span
+                };
                 RetrievalCandidate {
                     block_id: id,
-                    score: recency.clamp(0.0, 1.0),
+                    score: score.clamp(0.0, 1.0),
                     source: "recency".into(),
                 }
             })
@@ -550,6 +583,30 @@ mod tests {
         let r = SessionRetriever::new(store);
         let cands = r.retrieve(s, "x", 3).unwrap();
         assert_eq!(cands.len(), 3);
+    }
+
+    #[test]
+    fn recency_with_half_life_decays_exponentially() {
+        let (store, _dir) = open_tmp();
+        let s = SessionId(1);
+        // Three blocks: newest, one half-life back, two half-lives back.
+        let h_ms = 60_000_u64; // 60-second half-life
+        let newest = put(&store, s, b"now", 1_000_000_u64, BlockKind::Fact);
+        let one_back = put(&store, s, b"older", 1_000_000_u64 - h_ms, BlockKind::Fact);
+        let two_back = put(
+            &store,
+            s,
+            b"oldest",
+            1_000_000_u64 - 2 * h_ms,
+            BlockKind::Fact,
+        );
+        let r = RecencyRetriever::new(store).with_half_life(60.0);
+        let cands = r.retrieve(s, "x", usize::MAX).unwrap();
+        let by_id: std::collections::HashMap<BlockId, f32> =
+            cands.iter().map(|c| (c.block_id, c.score)).collect();
+        assert!((by_id[&newest] - 1.0).abs() < 1e-3);
+        assert!((by_id[&one_back] - 0.5).abs() < 1e-3);
+        assert!((by_id[&two_back] - 0.25).abs() < 1e-3);
     }
 
     #[test]

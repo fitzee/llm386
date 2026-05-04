@@ -31,10 +31,19 @@ const RETRIEVAL_LIMIT: usize = 4_096;
 /// [`OmissionReason::Redundant`]) when its body's whitespace-token
 /// set has Jaccard similarity ≥ `t` with any block already selected
 /// in the same section. `None` (the default) disables the check.
+///
+/// `include_parents` controls edge-aware inclusion. When `true`,
+/// after the per-section fill the pager walks every selected
+/// block's `Provenance.parents` (transitively) and pulls in any
+/// unselected ancestor that still fits the global `input_budget`.
+/// Useful for keeping `tool_result` blocks paired with the
+/// `tool_call` (or assistant message) that produced them. Default
+/// `false` to preserve the prior behavior.
 #[derive(Clone, Copy, Debug)]
 pub struct ScoringPolicy {
     pub priority_weight: f32,
     pub redundancy_threshold: Option<f32>,
+    pub include_parents: bool,
 }
 
 impl Default for ScoringPolicy {
@@ -42,6 +51,7 @@ impl Default for ScoringPolicy {
         Self {
             priority_weight: 0.5,
             redundancy_threshold: None,
+            include_parents: false,
         }
     }
 }
@@ -302,6 +312,42 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
                         reason: OmissionReason::Budget,
                         score: cand.score,
                     });
+                }
+            }
+        }
+
+        // === Step 6: optionally pull in ancestors of selected blocks ===
+        // Tool results, derived summaries, and reply chains carry
+        // their context in `Provenance.parents`. When edge-aware
+        // inclusion is enabled, walk those chains transitively and
+        // append any unselected ancestor that still fits the global
+        // budget. Section budgets are bypassed here on purpose —
+        // missing parents would break the meaning of children that
+        // already made the cut.
+        if self.scoring.include_parents {
+            let mut visited: HashSet<BlockId> = selected.iter().copied().collect();
+            let mut frontier: Vec<BlockId> = selected.clone();
+            while let Some(id) = frontier.pop() {
+                let Some(block) = self.store.get(id)? else {
+                    continue;
+                };
+                for &parent_id in &block.provenance.parents {
+                    if !visited.insert(parent_id) {
+                        continue;
+                    }
+                    let Some(parent) = self.store.get(parent_id)? else {
+                        continue;
+                    };
+                    let tokens = self.tokens_for(&parent)?;
+                    if prompt_total.saturating_add(tokens).0 <= input_budget.0 {
+                        prompt_total = prompt_total.saturating_add(tokens);
+                        block_tokens = block_tokens.saturating_add(tokens);
+                        selected.push(parent_id);
+                        frontier.push(parent_id);
+                    }
+                    // If the parent didn't fit we still mark it visited
+                    // so we don't loop on it; intentionally not adding
+                    // to omitted (it was never on the candidate path).
                 }
             }
         }
@@ -600,6 +646,72 @@ mod tests {
             .unwrap();
         assert!(plan2.selected.is_empty());
         assert_eq!(plan2.omitted.len(), 6);
+    }
+
+    #[test]
+    fn include_parents_pulls_in_ancestor_blocks() {
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        // Parent first.
+        let parent_id = store
+            .put(
+                session,
+                block(b"called the foo tool", BlockKind::AssistantMessage, 1, 1),
+            )
+            .unwrap();
+        // Child block whose provenance.parents references the parent.
+        let mut child = block(b"{\"result\": 42}", BlockKind::ToolResult, 2, 2);
+        child.provenance.parents = vec![parent_id];
+        let child_id = store.put(session, child).unwrap();
+
+        // Disable retrievers and ask for only the child via required.
+        let policy = ScoringPolicy {
+            include_parents: true,
+            ..ScoringPolicy::default()
+        };
+        let pager = GreedyPager::new(store, tok)
+            .with_retrievers(vec![])
+            .with_scoring(policy);
+        let plan = pager
+            .page(PageRequest {
+                session_id: session,
+                task: String::new(),
+                model: profile(1_000, 0),
+                required_blocks: vec![child_id],
+            })
+            .unwrap();
+        // Child was required; parent should be pulled in via the
+        // ancestor walk.
+        assert!(plan.selected.contains(&child_id));
+        assert!(plan.selected.contains(&parent_id));
+    }
+
+    #[test]
+    fn include_parents_disabled_by_default_skips_ancestors() {
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        let parent_id = store
+            .put(
+                session,
+                block(b"called the foo tool", BlockKind::AssistantMessage, 1, 1),
+            )
+            .unwrap();
+        let mut child = block(b"{\"result\": 42}", BlockKind::ToolResult, 2, 2);
+        child.provenance.parents = vec![parent_id];
+        let child_id = store.put(session, child).unwrap();
+
+        // Default policy → no parent walk.
+        let pager = GreedyPager::new(store, tok).with_retrievers(vec![]);
+        let plan = pager
+            .page(PageRequest {
+                session_id: session,
+                task: String::new(),
+                model: profile(1_000, 0),
+                required_blocks: vec![child_id],
+            })
+            .unwrap();
+        assert!(plan.selected.contains(&child_id));
+        assert!(!plan.selected.contains(&parent_id));
     }
 
     #[test]
