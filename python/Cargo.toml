@@ -1,0 +1,33 @@
+[workspace]
+# Keep this crate independent of the Rust workspace at the repo
+# root so maturin can build it without dragging the whole workspace
+# into its build context.
+
+[package]
+name = "llm386-py"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+authors = ["Matt Fitzgerald <matt.fitzgerald@gmail.com>"]
+publish = false
+description = "PyO3 bindings for the LLM386 context virtualization runtime."
+
+[lib]
+name = "llm386"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py39"] }
+llm386-core = { path = "../crates/llm386-core" }
+llm386-store-lmdb = { path = "../crates/llm386-store-lmdb" }
+llm386-tokenizer = { path = "../crates/llm386-tokenizer" }
+llm386-pager = { path = "../crates/llm386-pager" }
+llm386-packer = { path = "../crates/llm386-packer" }
+llm386-trace = { path = "../crates/llm386-trace" }
+llm386-compress = { path = "../crates/llm386-compress" }
+llm386-compress-anthropic = { path = "../crates/llm386-compress-anthropic" }
+getrandom = "0.4"
+
+[lints.rust]
+unsafe_code = "deny"

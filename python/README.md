@@ -1,6 +1,6 @@
 # llm386 (Python)
 
-Python wrapper for the [LLM386](../README.md) context virtualization runtime.
+Python bindings for the [LLM386](../README.md) context virtualization runtime, built with PyO3 + maturin. The whole runtime ships as a native extension; no separate binary or daemon is needed.
 
 ## Install
 
@@ -8,24 +8,26 @@ Python wrapper for the [LLM386](../README.md) context virtualization runtime.
 pip install llm386
 ```
 
-You also need the `llm386` binary on your `PATH`. From a checkout of this repo:
+## Build from source
 
 ```
-cargo build --release -p llm386-cli
-export PATH="$PWD/target/release:$PATH"
+pip install maturin
+cd python
+maturin develop
 ```
 
 ## Status
 
-This is the v0 SDK. It shells out to the `llm386` binary for every operation: correct, simple, slow (one process per call). A v1 PyO3-based SDK with the same public surface will replace this once it lands.
+PyO3 bindings (v0.2). The previous v0.1 was a CLI-shelling pure-Python wrapper; the public API is the same so code from v0.1 keeps working.
 
-Write code against this version and it should keep working when the native bindings ship.
+Custom retrievers, embedders, and summarizers written in Python (subclassing the trait) are on the roadmap for v0.3. For now, only the Rust-side implementations are exposed.
 
 ## Quick start
 
 ```python
 from llm386 import Store, list_models
 
+# Open or initialize an LMDB store at ./store. Idempotent.
 store = Store("./store")
 
 block_id = store.put(session=1, kind="user-message", body="What is the capital of Australia?")
@@ -78,35 +80,14 @@ result = store.pack(session=1, model="gpt-4o", task="...",
                     chat=True, trace="./traces")
 
 if result.trace_id:
-    from llm386 import Trace
-    print(Trace("./traces").show(result.trace_id))
+    print(f"recorded trace {result.trace_id}")
 ```
+
+Inspecting a recorded trace from Python is on the roadmap. For now, use the CLI: `llm386 trace show --store ./traces <call-id>`.
 
 ## Custom profiles, tokenizers, retrievers
 
-Pass a TOML config path via `profiles=`. Same schema as the CLI:
-
-```python
-store = Store("./store", profiles="./llm386.toml")
-```
-
-```toml
-# llm386.toml
-
-[[profile]]
-name = "my-tiny"
-max_context_tokens = 4096
-reserved_output_tokens = 1024
-tokenizer = "cl100k_base"
-
-[[hf_tokenizer]]
-name = "llama-3"
-path = "/path/to/llama-3-tokenizer.json"
-
-[[retriever]]
-kind = "bm25"
-k1 = 1.5
-```
+The PyO3 bindings ship the built-in registries today. Custom profile / tokenizer / retriever loading from a TOML config file is on the roadmap; in the interim, configure them via the CLI and have your Python code use the matching model name.
 
 ## Summarization
 

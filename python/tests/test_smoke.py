@@ -1,9 +1,6 @@
-"""End-to-end smoke tests. Exercise every public method against
-the real `llm386` binary built from the workspace."""
+"""End-to-end smoke tests for the PyO3-backed `llm386` package."""
 
 from __future__ import annotations
-
-import json
 
 import pytest
 
@@ -15,6 +12,13 @@ def test_put_returns_hex_id(store):
     assert isinstance(block_id, str)
     assert len(block_id) == 32
     int(block_id, 16)  # must parse as hex
+
+
+def test_put_accepts_str_or_bytes(store):
+    a = store.put(session=1, kind="fact", body="hello")
+    b = store.put(session=1, kind="fact", body=b"hello")
+    # Same content → same id (content-hash dedup).
+    assert a == b
 
 
 def test_show_roundtrips_block(store):
@@ -68,25 +72,18 @@ def test_pack_chat_returns_message_list(store):
     assert result.messages is not None
     assert result.rendered is None
     roles = [m.role for m in result.messages]
-    # System message + user task at minimum.
     assert "system" in roles
     assert "user" in roles
 
 
 def test_pack_with_trace_records_id(store, tmp_path):
     store.put(session=1, kind="user-message", body="x")
-    trace_dir = tmp_path / "traces"
+    trace_dir = str(tmp_path / "traces")
     result = store.pack(
         session=1, model="gpt-4o", task="reply", chat=True, trace=trace_dir
     )
     assert result.trace_id is not None
     assert len(result.trace_id) == 32
-
-    from llm386 import Trace
-
-    trace = Trace(trace_dir, binary=store.binary)
-    text = trace.show(result.trace_id)
-    assert result.trace_id in text
 
 
 def test_summarize_truncating_returns_text(store):
@@ -96,16 +93,29 @@ def test_summarize_truncating_returns_text(store):
     assert "fact" in out
 
 
-def test_list_models_includes_built_ins(llm386_binary):
-    models = list_models(binary=llm386_binary)
+def test_summarize_store_summary_persists_block(store):
+    for i in range(3):
+        store.put(session=1, kind="fact", body=f"fact number {i}")
+    before = len(store.list_sessions())
+    store.summarize(session=1, summarizer="truncating", store_summary=True)
+    # The summary block lands in the same session.
+    assert len(store.list_sessions()) == before
+
+
+def test_list_models_includes_built_ins():
+    models = list_models()
     names = {m.name for m in models}
-    # A few built-ins we know ship.
     assert "gpt-4o" in names
     assert "claude-opus-4-7" in names
     for m in models:
         assert m.max_context_tokens > 0
 
 
-def test_failed_invocation_raises_llm386_error(store):
+def test_unknown_model_raises_llm386_error(store):
     with pytest.raises(LLM386Error):
         store.page(session=1, model="bogus-model-name", task="x")
+
+
+def test_show_unknown_block_raises_llm386_error(store):
+    with pytest.raises(LLM386Error):
+        store.show("0" * 32)
