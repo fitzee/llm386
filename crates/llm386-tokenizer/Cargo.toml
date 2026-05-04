@@ -17,3 +17,10 @@ thiserror = { workspace = true }
 parking_lot = { workspace = true }
 tiktoken-rs = "0.11"
 lru = "0.18"
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "tokenize"
+harness = false

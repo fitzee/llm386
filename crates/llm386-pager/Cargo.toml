@@ -20,3 +20,8 @@ llm386-store-lmdb = { workspace = true }
 llm386-tokenizer = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "page"
+harness = false
