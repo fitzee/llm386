@@ -14,6 +14,6 @@ fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let args = cli::Cli::parse();
-    let registry = commands::load_models(args.profiles.as_deref())?;
-    commands::dispatch(args.command, &registry)
+    let config = commands::load_config(args.profiles.as_deref())?;
+    commands::dispatch(args.command, &config)
 }

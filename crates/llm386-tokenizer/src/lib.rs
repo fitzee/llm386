@@ -6,6 +6,7 @@
 #![doc(html_root_url = "https://docs.rs/llm386-tokenizer/0.1.0")]
 
 mod cache;
+mod huggingface;
 mod registry;
 mod tiktoken;
 
@@ -14,6 +15,7 @@ use std::sync::Arc;
 use llm386_core::TokenizerError;
 
 pub use cache::CachingTokenizer;
+pub use huggingface::HfTokenizer;
 pub use registry::{RegistryError, TokenizerRegistry};
 pub use tiktoken::{TiktokenTokenizer, cl100k_base, o200k_base};
 

@@ -28,6 +28,18 @@ impl TokenizerId {
     }
 }
 
+impl From<&str> for TokenizerId {
+    fn from(s: &str) -> Self {
+        Self::new(s)
+    }
+}
+
+impl From<String> for TokenizerId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
 impl fmt::Display for TokenizerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
