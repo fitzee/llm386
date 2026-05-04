@@ -1229,6 +1229,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "llm386-retrieve-ann"
+version = "0.1.0"
+dependencies = [
+ "llm386-core",
+ "llm386-store-lmdb",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "llm386-store-lmdb"
 version = "0.1.0"
 dependencies = [

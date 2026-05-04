@@ -71,7 +71,9 @@ impl AnthropicSummarizer {
         let key = std::env::var("ANTHROPIC_API_KEY")
             .map_err(|_| SummarizerError::Failed("ANTHROPIC_API_KEY env var not set".into()))?;
         if key.is_empty() {
-            return Err(SummarizerError::Failed("ANTHROPIC_API_KEY env var is empty".into()));
+            return Err(SummarizerError::Failed(
+                "ANTHROPIC_API_KEY env var is empty".into(),
+            ));
         }
         Ok(Self::new(key))
     }

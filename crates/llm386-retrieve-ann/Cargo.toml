@@ -1,0 +1,23 @@
+[package]
+name = "llm386-retrieve-ann"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Embedding-based retrievers for LLM386 (linear cosine + OpenAI embedder)."
+
+[lints]
+workspace = true
+
+[dependencies]
+llm386-core = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[dev-dependencies]
+llm386-store-lmdb = { workspace = true }
+tempfile = { workspace = true }

@@ -8,6 +8,7 @@
 #![doc(html_root_url = "https://docs.rs/llm386-core/0.1.0")]
 
 mod block;
+mod embedder;
 mod error;
 mod ids;
 mod model;
@@ -22,6 +23,7 @@ mod tokenizer;
 mod trace;
 
 pub use block::{BlockKind, ContextBlock, Provenance, TokenCounts};
+pub use embedder::{Embedder, EmbedderError};
 pub use error::LlmError;
 pub use ids::{BlockId, CallId, ContentHash, SessionId, Timestamp, TokenCount};
 pub use model::{ModelProfile, ModelRegistry, default_profiles, default_registry};
