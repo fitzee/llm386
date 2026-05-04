@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# OS / editor cruft
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Runtime artifacts (LMDB envs, dev memory dirs)
+/data
+/memory
+**/data.mdb
+**/lock.mdb

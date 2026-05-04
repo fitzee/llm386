@@ -1,0 +1,66 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/llm386-core",
+    "crates/llm386-store-lmdb",
+    "crates/llm386-tokenizer",
+    "crates/llm386-pager",
+    "crates/llm386-packer",
+    "crates/llm386-trace",
+    "crates/llm386-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+authors = ["Matt Fitzgerald <matt.fitzgerald@gmail.com>"]
+repository = "https://github.com/mattfitzgerald/llm386"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+
+[workspace.dependencies]
+# Internal crates
+llm386-core = { path = "crates/llm386-core", version = "0.1.0" }
+llm386-store-lmdb = { path = "crates/llm386-store-lmdb", version = "0.1.0" }
+llm386-tokenizer = { path = "crates/llm386-tokenizer", version = "0.1.0" }
+llm386-pager = { path = "crates/llm386-pager", version = "0.1.0" }
+llm386-packer = { path = "crates/llm386-packer", version = "0.1.0" }
+llm386-trace = { path = "crates/llm386-trace", version = "0.1.0" }
+
+# Common runtime deps (added per-crate as needed)
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+blake3 = "1"
+bytes = "1"
+parking_lot = "0.12"
+
+# Dev deps
+criterion = "0.5"
+proptest = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+debug = "line-tables-only"
