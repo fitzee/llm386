@@ -94,7 +94,35 @@ if result.trace_id:
 
 ## Custom profiles, tokenizers, retrievers
 
-The PyO3 bindings ship the built-in registries today. Custom profile / tokenizer / retriever loading from a TOML config file is on the roadmap; in the interim, configure them via the CLI and have your Python code use the matching model name.
+Pass a TOML config path via `profiles=`. Same schema the CLI uses:
+
+```python
+store = Store("./store", profiles="./llm386.toml")
+```
+
+```toml
+# llm386.toml
+
+[[profile]]
+name = "my-tiny"
+max_context_tokens = 4096
+reserved_output_tokens = 1024
+tokenizer = "cl100k_base"
+
+[[hf_tokenizer]]
+name = "llama-3"
+path = "/path/to/llama-3-tokenizer.json"
+
+[[retriever]]
+kind = "bm25"
+k1 = 1.5
+
+[[retriever]]
+kind = "recency"
+half_life_secs = 60.0
+```
+
+`[[profile]]` adds model profiles on top of the built-ins. `[[hf_tokenizer]]` registers a HuggingFace tokenizer.json for non-OpenAI models. `[[retriever]]` replaces the default RecencyRetriever stack with whatever you configure.
 
 ## Summarization
 

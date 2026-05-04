@@ -112,6 +112,53 @@ def test_trace_show_unknown_call_raises(tmp_path):
         trace.show("0" * 32)
 
 
+def test_store_with_profiles_loads_custom_model(tmp_path):
+    from llm386 import Store
+
+    config_path = tmp_path / "llm386.toml"
+    config_path.write_text(
+        '[[profile]]\n'
+        'name = "my-tiny"\n'
+        'max_context_tokens = 4096\n'
+        'reserved_output_tokens = 1024\n'
+        'tokenizer = "cl100k_base"\n'
+    )
+    store = Store(str(tmp_path / "store"), profiles=str(config_path))
+    store.put(session=1, kind="user-message", body="hi")
+    plan = store.page(session=1, model="my-tiny", task="reply")
+    assert len(plan.selected) >= 1
+
+
+def test_store_with_profiles_applies_retriever_stack(tmp_path):
+    from llm386 import Store
+
+    config_path = tmp_path / "llm386.toml"
+    config_path.write_text(
+        '[[retriever]]\n'
+        'kind = "bm25"\n'
+        'k1 = 1.5\n'
+        '\n'
+        '[[retriever]]\n'
+        'kind = "recency"\n'
+        'half_life_secs = 60.0\n'
+    )
+    store = Store(str(tmp_path / "store"), profiles=str(config_path))
+    store.put(session=1, kind="fact", body="paris is the capital of france")
+    plan = store.page(session=1, model="gpt-4o", task="what is the capital of france")
+    assert len(plan.selected) >= 1
+
+
+def test_store_with_invalid_retriever_kind_raises(tmp_path):
+    from llm386 import LLM386Error, Store
+
+    config_path = tmp_path / "llm386.toml"
+    config_path.write_text('[[retriever]]\nkind = "bogus-kind"\n')
+    store = Store(str(tmp_path / "store"), profiles=str(config_path))
+    store.put(session=1, kind="fact", body="x")
+    with pytest.raises(LLM386Error):
+        store.page(session=1, model="gpt-4o", task="x")
+
+
 def test_summarize_truncating_returns_text(store):
     for i in range(3):
         store.put(session=1, kind="fact", body=f"fact number {i}")

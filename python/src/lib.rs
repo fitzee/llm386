@@ -8,6 +8,7 @@
 
 use pyo3::prelude::*;
 
+mod config;
 mod store;
 mod types;
 

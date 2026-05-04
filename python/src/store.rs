@@ -22,6 +22,7 @@ use llm386_store_lmdb::{LmdbStore, StoreConfig};
 use llm386_tokenizer::{TokenizerRegistry, default_registry as default_tokenizers};
 use llm386_trace::LmdbTraceSink;
 
+use crate::config;
 use crate::types::{ChatMessage, ContextBlock, PackResult, PagePlan, TraceRecord};
 
 create_exception!(llm386, LLM386Error, PyException);
@@ -31,21 +32,36 @@ pub struct Store {
     inner: Arc<LmdbStore>,
     tokenizers: TokenizerRegistry,
     models: ModelRegistry,
+    retriever_entries: Vec<config::RetrieverEntry>,
 }
 
 #[pymethods]
 impl Store {
     /// Open (or create) an LMDB store at `path`. Idempotent.
+    ///
+    /// `profiles` optionally points at a TOML config file with the
+    /// same schema the CLI accepts (`[[profile]]`,
+    /// `[[hf_tokenizer]]`, `[[retriever]]`). User profiles override
+    /// built-ins by name; user retriever entries replace the
+    /// default RecencyRetriever stack.
     #[new]
-    fn new(path: PathBuf) -> PyResult<Self> {
+    #[pyo3(signature = (path, *, profiles = None))]
+    fn new(path: PathBuf, profiles: Option<PathBuf>) -> PyResult<Self> {
         let inner = Arc::new(
             LmdbStore::open(&path, StoreConfig::default())
                 .map_err(|e| LLM386Error::new_err(format!("open store: {e}")))?,
         );
-        let tokenizers = default_tokenizers()
+        let mut tokenizers = default_tokenizers()
             .map_err(|e| LLM386Error::new_err(format!("init tokenizers: {e}")))?;
-        let models = default_registry();
-        Ok(Self { inner, tokenizers, models })
+        let mut models = default_registry();
+        let retriever_entries = if let Some(cfg_path) = profiles {
+            let parsed = config::parse(&cfg_path).map_err(LLM386Error::new_err)?;
+            config::apply(parsed, &mut models, &mut tokenizers)
+                .map_err(LLM386Error::new_err)?
+        } else {
+            Vec::new()
+        };
+        Ok(Self { inner, tokenizers, models, retriever_entries })
     }
 
     /// Insert a block. Returns the assigned BlockId (32-char hex).
@@ -127,7 +143,12 @@ impl Store {
     /// Run the pager and return the resulting plan.
     fn page(&self, session: u128, model: &str, task: &str) -> PyResult<PagePlan> {
         let (profile, tokenizer) = self.profile_and_tokenizer(model)?;
-        let pager = GreedyPager::new(self.inner.clone(), tokenizer);
+        let mut pager = GreedyPager::new(self.inner.clone(), tokenizer);
+        if let Some(retrievers) = config::build_retrievers(&self.retriever_entries, &self.inner)
+            .map_err(LLM386Error::new_err)?
+        {
+            pager = pager.with_retrievers(retrievers);
+        }
         let request = PageRequest {
             session_id: SessionId(session),
             task: task.to_string(),
@@ -150,7 +171,12 @@ impl Store {
         trace: Option<PathBuf>,
     ) -> PyResult<PackResult> {
         let (profile, tokenizer) = self.profile_and_tokenizer(model)?;
-        let pager = GreedyPager::new(self.inner.clone(), tokenizer.clone());
+        let mut pager = GreedyPager::new(self.inner.clone(), tokenizer.clone());
+        if let Some(retrievers) = config::build_retrievers(&self.retriever_entries, &self.inner)
+            .map_err(LLM386Error::new_err)?
+        {
+            pager = pager.with_retrievers(retrievers);
+        }
         let packer = SimplePacker::new(self.inner.clone(), tokenizer);
         let request = PageRequest {
             session_id: SessionId(session),
