@@ -101,6 +101,26 @@ pub(crate) enum Command {
         store: PathBuf,
     },
 
+    /// Read-only integrity check: walks every block, recomputes
+    /// content hashes, and verifies the indexes are consistent.
+    Verify {
+        /// Path to the LMDB store.
+        #[arg(long)]
+        store: PathBuf,
+    },
+
+    /// Rebuilds derivable indexes (hash index) from the primary
+    /// table and removes orphan session entries. Destructive —
+    /// requires `--yes`.
+    Repair {
+        /// Path to the LMDB store.
+        #[arg(long)]
+        store: PathBuf,
+        /// Required confirmation flag.
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Delete a single block or every block in a session.
     /// Destructive — requires `--yes`.
     Purge {

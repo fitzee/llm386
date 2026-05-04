@@ -383,6 +383,220 @@ impl BlockStore for LmdbStore {
     }
 }
 
+impl LmdbStore {
+    /// Read-only integrity check. Walks every block in the primary
+    /// table, recomputes its content hash, and verifies the hash
+    /// index and session index are consistent.
+    pub fn verify(&self) -> Result<VerifyReport, StoreError> {
+        use std::collections::HashSet;
+        let rtxn = self.env.read_txn().map_err(|e| heed_err(&e))?;
+        let mut report = VerifyReport::default();
+        let mut all_ids: HashSet<BlockId> = HashSet::new();
+
+        let iter = self.blocks_by_id.iter(&rtxn).map_err(|e| heed_err(&e))?;
+        for entry in iter {
+            let (key, value) = entry.map_err(|e| heed_err(&e))?;
+            let id_bytes: [u8; 16] = key
+                .try_into()
+                .map_err(|_| StoreError::Backend(format!("id width {}", key.len())))?;
+            let id = BlockId(u128::from_be_bytes(id_bytes));
+            let block: ContextBlock = postcard::from_bytes(value)
+                .map_err(|e| StoreError::Backend(format!("postcard decode: {e}")))?;
+            all_ids.insert(id);
+            report.blocks_checked += 1;
+
+            // Hash sanity.
+            let computed = ContentHash::of(&block.bytes);
+            if computed != block.hash {
+                report.hash_mismatches.push(id);
+            }
+
+            // Hash index entry must exist and point back at this id.
+            match self
+                .blocks_by_hash
+                .get(&rtxn, &block.hash.0)
+                .map_err(|e| heed_err(&e))?
+            {
+                None => report.missing_from_hash_index.push(id),
+                Some(bytes) => {
+                    let pointed = decode_block_id(bytes)?;
+                    if pointed != id {
+                        report.hash_index_misroutes.push(id);
+                    }
+                }
+            }
+        }
+
+        // Sweep blocks_by_session for orphaned entries.
+        let mut ids_with_session: HashSet<BlockId> = HashSet::new();
+        let iter = self
+            .blocks_by_session
+            .iter(&rtxn)
+            .map_err(|e| heed_err(&e))?;
+        for entry in iter {
+            let (key, _) = entry.map_err(|e| heed_err(&e))?;
+            if key.len() != 32 {
+                continue;
+            }
+            let id_bytes: [u8; 16] = key[16..]
+                .try_into()
+                .map_err(|_| StoreError::Backend("session key suffix".into()))?;
+            let id = BlockId(u128::from_be_bytes(id_bytes));
+            if all_ids.contains(&id) {
+                ids_with_session.insert(id);
+            } else {
+                report.orphan_session_entries += 1;
+            }
+        }
+
+        for id in &all_ids {
+            if !ids_with_session.contains(id) {
+                report.blocks_with_no_session.push(*id);
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Rebuilds derivable indexes (`blocks_by_hash`) from
+    /// `blocks_by_id` and removes orphan session entries that
+    /// reference missing blocks. Blocks whose stored hash doesn't
+    /// match their computed hash are left alone and reported — they
+    /// indicate real corruption that needs human review.
+    pub fn repair(&self) -> Result<RepairReport, StoreError> {
+        use std::collections::HashSet;
+        let mut report = RepairReport::default();
+        let mut wtxn = self.env.write_txn().map_err(|e| heed_err(&e))?;
+
+        // Step 1: enumerate every real block.
+        let mut blocks: Vec<(BlockId, ContentHash)> = Vec::new();
+        {
+            let iter = self.blocks_by_id.iter(&wtxn).map_err(|e| heed_err(&e))?;
+            for entry in iter {
+                let (key, value) = entry.map_err(|e| heed_err(&e))?;
+                let id_bytes: [u8; 16] = key
+                    .try_into()
+                    .map_err(|_| StoreError::Backend(format!("id width {}", key.len())))?;
+                let id = BlockId(u128::from_be_bytes(id_bytes));
+                let block: ContextBlock = postcard::from_bytes(value)
+                    .map_err(|e| StoreError::Backend(format!("postcard decode: {e}")))?;
+                let computed = ContentHash::of(&block.bytes);
+                if computed != block.hash {
+                    report.hash_mismatches_quarantined.push(id);
+                }
+                blocks.push((id, block.hash));
+            }
+        }
+
+        // Step 2: rebuild blocks_by_hash from scratch.
+        self.blocks_by_hash
+            .clear(&mut wtxn)
+            .map_err(|e| heed_err(&e))?;
+        for (id, hash) in &blocks {
+            let id_key = id.0.to_be_bytes();
+            self.blocks_by_hash
+                .put(&mut wtxn, &hash.0, &id_key)
+                .map_err(|e| heed_err(&e))?;
+            report.hash_entries_written += 1;
+        }
+        report.hash_index_rebuilt = true;
+
+        // Step 3: scrub orphan session entries.
+        let real_ids: HashSet<BlockId> = blocks.iter().map(|(id, _)| *id).collect();
+        let to_remove: Vec<Vec<u8>> = {
+            let iter = self
+                .blocks_by_session
+                .iter(&wtxn)
+                .map_err(|e| heed_err(&e))?;
+            let mut v = Vec::new();
+            for entry in iter {
+                let (key, _) = entry.map_err(|e| heed_err(&e))?;
+                if key.len() != 32 {
+                    continue;
+                }
+                let id_bytes: [u8; 16] = key[16..]
+                    .try_into()
+                    .map_err(|_| StoreError::Backend("session key suffix".into()))?;
+                let id = BlockId(u128::from_be_bytes(id_bytes));
+                if !real_ids.contains(&id) {
+                    v.push(key.to_vec());
+                }
+            }
+            v
+        };
+        for key in &to_remove {
+            self.blocks_by_session
+                .delete(&mut wtxn, key.as_slice())
+                .map_err(|e| heed_err(&e))?;
+        }
+        report.orphan_session_entries_removed = to_remove.len();
+
+        // Step 4: report blocks with zero session refs (can't auto-fix).
+        let mut ids_with_session: HashSet<BlockId> = HashSet::new();
+        {
+            let iter = self
+                .blocks_by_session
+                .iter(&wtxn)
+                .map_err(|e| heed_err(&e))?;
+            for entry in iter {
+                let (key, _) = entry.map_err(|e| heed_err(&e))?;
+                if key.len() != 32 {
+                    continue;
+                }
+                let id_bytes: [u8; 16] = key[16..]
+                    .try_into()
+                    .map_err(|_| StoreError::Backend("session key suffix".into()))?;
+                ids_with_session.insert(BlockId(u128::from_be_bytes(id_bytes)));
+            }
+        }
+        for id in real_ids {
+            if !ids_with_session.contains(&id) {
+                report.blocks_with_no_session.push(id);
+            }
+        }
+
+        wtxn.commit().map_err(|e| heed_err(&e))?;
+        Ok(report)
+    }
+}
+
+/// Result of [`LmdbStore::verify`].
+#[derive(Debug, Default)]
+pub struct VerifyReport {
+    pub blocks_checked: usize,
+    pub hash_mismatches: Vec<BlockId>,
+    pub missing_from_hash_index: Vec<BlockId>,
+    pub hash_index_misroutes: Vec<BlockId>,
+    pub orphan_session_entries: usize,
+    pub blocks_with_no_session: Vec<BlockId>,
+}
+
+impl VerifyReport {
+    /// True when every check passed.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.hash_mismatches.is_empty()
+            && self.missing_from_hash_index.is_empty()
+            && self.hash_index_misroutes.is_empty()
+            && self.orphan_session_entries == 0
+            && self.blocks_with_no_session.is_empty()
+    }
+}
+
+/// Result of [`LmdbStore::repair`].
+#[derive(Debug, Default)]
+pub struct RepairReport {
+    pub hash_index_rebuilt: bool,
+    pub hash_entries_written: usize,
+    pub orphan_session_entries_removed: usize,
+    /// Blocks whose stored hash doesn't match their bytes. These
+    /// are left in the store untouched; human review needed.
+    pub hash_mismatches_quarantined: Vec<BlockId>,
+    /// Blocks with no remaining session reference after repair.
+    /// Not removed automatically.
+    pub blocks_with_no_session: Vec<BlockId>,
+}
+
 /// Errors that can occur while opening an [`LmdbStore`].
 #[derive(Debug, Error)]
 pub enum StoreOpenError {
@@ -595,6 +809,39 @@ mod tests {
         // s2 still references the shared block, and the block content survives.
         assert_eq!(store.list_session(s2).unwrap(), vec![id]);
         assert!(store.get(id).unwrap().is_some());
+    }
+
+    #[test]
+    fn verify_clean_store_reports_zero_errors() {
+        let (store, _dir) = open_tmp();
+        let session = SessionId(1);
+        store
+            .put(session, make_block(b"a", BlockKind::Fact, 1, 1))
+            .unwrap();
+        store
+            .put(session, make_block(b"b", BlockKind::Fact, 2, 2))
+            .unwrap();
+        let report = store.verify().unwrap();
+        assert!(report.is_clean(), "{report:?}");
+        assert_eq!(report.blocks_checked, 2);
+    }
+
+    #[test]
+    fn repair_rebuilds_hash_index_from_primary_table() {
+        let (store, _dir) = open_tmp();
+        let session = SessionId(1);
+        store
+            .put(session, make_block(b"a", BlockKind::Fact, 1, 1))
+            .unwrap();
+        store
+            .put(session, make_block(b"b", BlockKind::Fact, 2, 2))
+            .unwrap();
+        let report = store.repair().unwrap();
+        assert!(report.hash_index_rebuilt);
+        assert_eq!(report.hash_entries_written, 2);
+        assert_eq!(report.orphan_session_entries_removed, 0);
+        // Verify reports clean afterwards.
+        assert!(store.verify().unwrap().is_clean());
     }
 
     #[test]

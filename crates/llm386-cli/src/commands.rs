@@ -228,6 +228,8 @@ pub(crate) fn dispatch(command: Command, config: &LoadedConfig) -> Result<()> {
         ),
         Command::Trace(TraceSub::Show { store, call_id }) => trace_show(&store, CallId(call_id)),
         Command::ListSessions { store } => list_sessions(&store),
+        Command::Verify { store } => verify(&store),
+        Command::Repair { store, yes } => repair(&store, yes),
         Command::Purge {
             store,
             block,
@@ -527,6 +529,84 @@ fn list_sessions(store_path: &Path) -> Result<()> {
     let sessions = store.list_sessions()?;
     for s in sessions {
         println!("{s}");
+    }
+    Ok(())
+}
+
+fn verify(store_path: &Path) -> Result<()> {
+    let store = LmdbStore::open(store_path, StoreConfig::default())
+        .with_context(|| format!("opening store at {}", store_path.display()))?;
+    let report = store.verify()?;
+    println!("blocks checked:           {}", report.blocks_checked);
+    println!("hash mismatches:          {}", report.hash_mismatches.len());
+    println!(
+        "missing from hash index:  {}",
+        report.missing_from_hash_index.len()
+    );
+    println!(
+        "hash index misroutes:     {}",
+        report.hash_index_misroutes.len()
+    );
+    println!(
+        "orphan session entries:   {}",
+        report.orphan_session_entries
+    );
+    println!(
+        "blocks with no session:   {}",
+        report.blocks_with_no_session.len()
+    );
+    if !report.hash_mismatches.is_empty() {
+        eprintln!("\nhash mismatches:");
+        for id in &report.hash_mismatches {
+            eprintln!("  {id}");
+        }
+    }
+    if !report.missing_from_hash_index.is_empty() {
+        eprintln!("\nmissing from hash index:");
+        for id in &report.missing_from_hash_index {
+            eprintln!("  {id}");
+        }
+    }
+    if report.is_clean() {
+        println!("\nOK");
+        Ok(())
+    } else {
+        Err(anyhow!("integrity check failed"))
+    }
+}
+
+fn repair(store_path: &Path, yes: bool) -> Result<()> {
+    if !yes {
+        return Err(anyhow!("destructive operation: pass --yes to confirm"));
+    }
+    let store = LmdbStore::open(store_path, StoreConfig::default())
+        .with_context(|| format!("opening store at {}", store_path.display()))?;
+    let report = store.repair()?;
+    println!(
+        "hash index rebuilt:                  {}",
+        report.hash_index_rebuilt
+    );
+    println!(
+        "hash entries written:                {}",
+        report.hash_entries_written
+    );
+    println!(
+        "orphan session entries removed:      {}",
+        report.orphan_session_entries_removed
+    );
+    println!(
+        "blocks with no session (untouched):  {}",
+        report.blocks_with_no_session.len()
+    );
+    println!(
+        "hash mismatches quarantined:         {}",
+        report.hash_mismatches_quarantined.len()
+    );
+    if !report.hash_mismatches_quarantined.is_empty() {
+        eprintln!("\nhash mismatches (left as-is, need human review):");
+        for id in &report.hash_mismatches_quarantined {
+            eprintln!("  {id}");
+        }
     }
     Ok(())
 }
