@@ -46,4 +46,7 @@ pub enum OmissionReason {
     FilteredByKind,
     /// Block depended on another block that was not included.
     DependencyMissing,
+    /// Block did not fit but a Summary block referencing it was
+    /// included in its place.
+    Compressed,
 }
