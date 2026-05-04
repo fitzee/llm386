@@ -13,4 +13,6 @@ mod retrievers;
 
 pub use budget::{SectionAllocation, SectionBudgetTable};
 pub use greedy::{GreedyPager, ScoringPolicy};
-pub use retrievers::{LexicalRetriever, PinnedRetriever, RecencyRetriever, SessionRetriever};
+pub use retrievers::{
+    Bm25Retriever, LexicalRetriever, PinnedRetriever, RecencyRetriever, SessionRetriever,
+};
