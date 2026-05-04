@@ -12,3 +12,12 @@ description = "LMDB-backed block and metadata storage for LLM386."
 workspace = true
 
 [dependencies]
+llm386-core = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+tracing = { workspace = true }
+heed = "0.22"
+
+[dev-dependencies]
+tempfile = { workspace = true }
