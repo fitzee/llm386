@@ -236,6 +236,151 @@ impl BlockStore for LmdbStore {
             None => Ok(None),
         }
     }
+
+    #[instrument(skip(self), fields(id = %id))]
+    fn delete(&self, id: BlockId) -> Result<bool, StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(|e| heed_err(&e))?;
+        let id_key = id.0.to_be_bytes();
+
+        // Look up the block's content hash so we can clean the
+        // hash index too. If the block doesn't exist, we still want
+        // to scrub any orphaned session pointers below.
+        let hash = match self
+            .blocks_by_id
+            .get(&wtxn, &id_key)
+            .map_err(|e| heed_err(&e))?
+        {
+            Some(bytes) => {
+                let block: ContextBlock = postcard::from_bytes(bytes)
+                    .map_err(|e| StoreError::Backend(format!("postcard decode: {e}")))?;
+                Some(block.hash)
+            }
+            None => None,
+        };
+
+        // Collect every (session, id) entry that references this block.
+        let session_keys: Vec<Vec<u8>> = {
+            let iter = self
+                .blocks_by_session
+                .iter(&wtxn)
+                .map_err(|e| heed_err(&e))?;
+            let mut keys = Vec::new();
+            for entry in iter {
+                let (key, _) = entry.map_err(|e| heed_err(&e))?;
+                if key.len() == 32 && key[16..] == id_key {
+                    keys.push(key.to_vec());
+                }
+            }
+            keys
+        };
+
+        let existed = hash.is_some() || !session_keys.is_empty();
+        if !existed {
+            // Nothing to do — short-circuit before opening any writes.
+            return Ok(false);
+        }
+
+        for key in &session_keys {
+            self.blocks_by_session
+                .delete(&mut wtxn, key.as_slice())
+                .map_err(|e| heed_err(&e))?;
+        }
+        if hash.is_some() {
+            self.blocks_by_id
+                .delete(&mut wtxn, &id_key)
+                .map_err(|e| heed_err(&e))?;
+        }
+        if let Some(hash) = hash {
+            self.blocks_by_hash
+                .delete(&mut wtxn, &hash.0)
+                .map_err(|e| heed_err(&e))?;
+        }
+        wtxn.commit().map_err(|e| heed_err(&e))?;
+        debug!(
+            ?id,
+            deleted_session_refs = session_keys.len(),
+            "block deleted"
+        );
+        Ok(true)
+    }
+
+    #[instrument(skip(self), fields(session = %session))]
+    fn purge_session(&self, session: SessionId) -> Result<usize, StoreError> {
+        let mut wtxn = self.env.write_txn().map_err(|e| heed_err(&e))?;
+        let prefix = session.0.to_be_bytes();
+
+        // Step 1: collect every block id this session references.
+        let block_ids: Vec<BlockId> = {
+            let iter = self
+                .blocks_by_session
+                .prefix_iter(&wtxn, &prefix)
+                .map_err(|e| heed_err(&e))?;
+            let mut ids = Vec::new();
+            for entry in iter {
+                let (key, _) = entry.map_err(|e| heed_err(&e))?;
+                if key.len() != 32 {
+                    continue;
+                }
+                let block_bytes: [u8; 16] = key[16..]
+                    .try_into()
+                    .map_err(|_| StoreError::Backend("session key suffix".into()))?;
+                ids.push(BlockId(u128::from_be_bytes(block_bytes)));
+            }
+            ids
+        };
+        let count = block_ids.len();
+        if count == 0 {
+            return Ok(0);
+        }
+
+        // Step 2: drop this session's references.
+        for id in &block_ids {
+            let key = session_block_key(session, *id);
+            self.blocks_by_session
+                .delete(&mut wtxn, &key)
+                .map_err(|e| heed_err(&e))?;
+        }
+
+        // Step 3: for each id, scan blocks_by_session for any
+        // remaining reference. If none, delete the block content
+        // and its hash entry too.
+        for id in block_ids {
+            let id_key = id.0.to_be_bytes();
+            let still_referenced = {
+                let iter = self
+                    .blocks_by_session
+                    .iter(&wtxn)
+                    .map_err(|e| heed_err(&e))?;
+                let mut found = false;
+                for entry in iter {
+                    let (key, _) = entry.map_err(|e| heed_err(&e))?;
+                    if key.len() == 32 && key[16..] == id_key {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            };
+            if !still_referenced
+                && let Some(bytes) = self
+                    .blocks_by_id
+                    .get(&wtxn, &id_key)
+                    .map_err(|e| heed_err(&e))?
+            {
+                let block: ContextBlock = postcard::from_bytes(bytes)
+                    .map_err(|e| StoreError::Backend(format!("postcard decode: {e}")))?;
+                self.blocks_by_id
+                    .delete(&mut wtxn, &id_key)
+                    .map_err(|e| heed_err(&e))?;
+                self.blocks_by_hash
+                    .delete(&mut wtxn, &block.hash.0)
+                    .map_err(|e| heed_err(&e))?;
+            }
+        }
+
+        wtxn.commit().map_err(|e| heed_err(&e))?;
+        Ok(count)
+    }
 }
 
 /// Errors that can occur while opening an [`LmdbStore`].
@@ -362,6 +507,94 @@ mod tests {
     fn list_sessions_empty_when_no_blocks() {
         let (store, _dir) = open_tmp();
         assert!(store.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_removes_block_from_all_indexes() {
+        let (store, _dir) = open_tmp();
+        let session = SessionId(1);
+        let block = make_block(b"to-be-deleted", BlockKind::Fact, 1, 1);
+        let hash = block.hash;
+        let id = store.put(session, block).unwrap();
+
+        assert!(store.get(id).unwrap().is_some());
+        assert_eq!(store.lookup_hash(hash).unwrap(), Some(id));
+        assert_eq!(store.list_session(session).unwrap(), vec![id]);
+
+        let deleted = store.delete(id).unwrap();
+        assert!(deleted);
+        assert!(store.get(id).unwrap().is_none());
+        assert_eq!(store.lookup_hash(hash).unwrap(), None);
+        assert!(store.list_session(session).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_returns_false_for_unknown_block() {
+        let (store, _dir) = open_tmp();
+        let bogus = BlockId::from_parts(99, 99);
+        assert!(!store.delete(bogus).unwrap());
+    }
+
+    #[test]
+    fn delete_scrubs_block_from_every_session_referencing_it() {
+        let (store, _dir) = open_tmp();
+        let s1 = SessionId(1);
+        let s2 = SessionId(2);
+        let block = make_block(b"shared", BlockKind::Fact, 1, 1);
+        let id_a = store.put(s1, block.clone()).unwrap();
+        // Same content → dedup → same id under a different session.
+        let id_b = store.put(s2, block).unwrap();
+        assert_eq!(id_a, id_b);
+
+        store.delete(id_a).unwrap();
+        assert!(store.list_session(s1).unwrap().is_empty());
+        assert!(store.list_session(s2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn purge_session_removes_blocks_unique_to_that_session() {
+        let (store, _dir) = open_tmp();
+        let session = SessionId(7);
+        store
+            .put(session, make_block(b"a", BlockKind::Fact, 1, 1))
+            .unwrap();
+        store
+            .put(session, make_block(b"b", BlockKind::Fact, 2, 2))
+            .unwrap();
+        store
+            .put(session, make_block(b"c", BlockKind::Fact, 3, 3))
+            .unwrap();
+
+        let purged = store.purge_session(session).unwrap();
+        assert_eq!(purged, 3);
+        assert!(store.list_session(session).unwrap().is_empty());
+        assert!(store.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn purge_session_keeps_blocks_referenced_by_other_sessions() {
+        let (store, _dir) = open_tmp();
+        let s1 = SessionId(1);
+        let s2 = SessionId(2);
+        // Same content → both sessions point at the same id.
+        let id = store
+            .put(s1, make_block(b"shared", BlockKind::Fact, 1, 1))
+            .unwrap();
+        let id_b = store
+            .put(s2, make_block(b"shared", BlockKind::Fact, 2, 2))
+            .unwrap();
+        assert_eq!(id, id_b);
+        // s1-only block.
+        let _solo = store
+            .put(s1, make_block(b"solo", BlockKind::Fact, 3, 3))
+            .unwrap();
+
+        store.purge_session(s1).unwrap();
+        // s1 is gone.
+        assert!(store.list_session(s1).unwrap().is_empty());
+        // s2 still references the shared block, and the block content survives.
+        assert_eq!(store.list_session(s2).unwrap(), vec![id]);
+        assert!(store.get(id).unwrap().is_some());
     }
 
     #[test]

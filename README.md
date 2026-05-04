@@ -214,7 +214,7 @@ def turn(session_id: int, user_input: str) -> str:
     return reply
 ```
 
-The current SDK shells to the CLI binary on every call; a PyO3-based version with the same surface is planned. See [`python/README.md`](./python/README.md) for the full Python API.
+The Python package is a PyO3-built native extension (no separate binary or daemon required). See [`python/README.md`](./python/README.md) for the full Python API.
 
 ### Framework hooks
 

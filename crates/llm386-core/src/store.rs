@@ -32,6 +32,28 @@ pub trait BlockStore: Send + Sync {
 
     /// Look up a block id by its content hash.
     fn lookup_hash(&self, hash: ContentHash) -> Result<Option<BlockId>, StoreError>;
+
+    /// Delete a block entirely: from the primary table, the
+    /// content-hash index, and every session that referenced it.
+    /// Returns `true` if the block existed, `false` otherwise.
+    ///
+    /// Default impl errors out so existing stores that don't yet
+    /// support deletion fail loudly rather than silently no-op.
+    fn delete(&self, _id: BlockId) -> Result<bool, StoreError> {
+        Err(StoreError::Backend(
+            "delete not implemented for this BlockStore".into(),
+        ))
+    }
+
+    /// Remove every block belonging to `session`. Blocks that no
+    /// other session references are also removed from the primary
+    /// table and the content-hash index. Returns the number of
+    /// blocks affected (whether or not they were dedup'd elsewhere).
+    fn purge_session(&self, _session: SessionId) -> Result<usize, StoreError> {
+        Err(StoreError::Backend(
+            "purge_session not implemented for this BlockStore".into(),
+        ))
+    }
 }
 
 #[derive(Debug, Error)]

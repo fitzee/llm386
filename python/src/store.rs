@@ -106,6 +106,24 @@ impl Store {
         Ok(sessions.into_iter().map(|s| format!("{s}")).collect())
     }
 
+    /// Delete a block entirely: from the primary table, the
+    /// content-hash index, and every session that referenced it.
+    /// Returns True if the block existed.
+    fn delete(&self, block_id: &str) -> PyResult<bool> {
+        let id = parse_block_id(block_id)?;
+        self.inner.delete(id).map_err(|e| LLM386Error::new_err(format!("delete: {e}")))
+    }
+
+    /// Remove every block belonging to `session`. Returns the count
+    /// of blocks affected. Blocks still referenced by other
+    /// sessions are kept; ones with no remaining references are
+    /// removed entirely (including from the content-hash index).
+    fn purge_session(&self, session: u128) -> PyResult<usize> {
+        self.inner
+            .purge_session(SessionId(session))
+            .map_err(|e| LLM386Error::new_err(format!("purge_session: {e}")))
+    }
+
     /// Run the pager and return the resulting plan.
     fn page(&self, session: u128, model: &str, task: &str) -> PyResult<PagePlan> {
         let (profile, tokenizer) = self.profile_and_tokenizer(model)?;

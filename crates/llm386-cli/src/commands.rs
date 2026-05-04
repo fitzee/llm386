@@ -228,6 +228,12 @@ pub(crate) fn dispatch(command: Command, config: &LoadedConfig) -> Result<()> {
         ),
         Command::Trace(TraceSub::Show { store, call_id }) => trace_show(&store, CallId(call_id)),
         Command::ListSessions { store } => list_sessions(&store),
+        Command::Purge {
+            store,
+            block,
+            session,
+            yes,
+        } => purge(&store, block, session, yes),
         Command::Show { store, id, json } => show(&store, BlockId(id), json),
         Command::Summarize {
             store,
@@ -523,6 +529,35 @@ fn list_sessions(store_path: &Path) -> Result<()> {
         println!("{s}");
     }
     Ok(())
+}
+
+fn purge(store_path: &Path, block: Option<u128>, session: Option<u128>, yes: bool) -> Result<()> {
+    if !yes {
+        return Err(anyhow!("destructive operation: pass --yes to confirm"));
+    }
+    match (block, session) {
+        (Some(_), Some(_)) | (None, None) => {
+            Err(anyhow!("specify exactly one of --block or --session"))
+        }
+        (Some(id), None) => {
+            let store = LmdbStore::open(store_path, StoreConfig::default())
+                .with_context(|| format!("opening store at {}", store_path.display()))?;
+            let deleted = store.delete(BlockId(id))?;
+            if deleted {
+                println!("deleted block {}", BlockId(id));
+            } else {
+                eprintln!("block not found: {}", BlockId(id));
+            }
+            Ok(())
+        }
+        (None, Some(sid)) => {
+            let store = LmdbStore::open(store_path, StoreConfig::default())
+                .with_context(|| format!("opening store at {}", store_path.display()))?;
+            let count = store.purge_session(SessionId(sid))?;
+            println!("purged {count} blocks from session {}", SessionId(sid));
+            Ok(())
+        }
+    }
 }
 
 fn show(store_path: &Path, id: BlockId, json: bool) -> Result<()> {

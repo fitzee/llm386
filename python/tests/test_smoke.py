@@ -119,3 +119,35 @@ def test_unknown_model_raises_llm386_error(store):
 def test_show_unknown_block_raises_llm386_error(store):
     with pytest.raises(LLM386Error):
         store.show("0" * 32)
+
+
+def test_delete_removes_block(store):
+    block_id = store.put(session=1, kind="fact", body="to be deleted")
+    assert store.delete(block_id) is True
+    with pytest.raises(LLM386Error):
+        store.show(block_id)
+
+
+def test_delete_returns_false_for_unknown(store):
+    assert store.delete("0" * 32) is False
+
+
+def test_purge_session_removes_session_blocks(store):
+    for i in range(4):
+        store.put(session=1, kind="fact", body=f"fact {i}")
+    sessions_before = store.list_sessions()
+    assert "00000000000000000000000000000001" in sessions_before
+    purged = store.purge_session(1)
+    assert purged == 4
+    sessions_after = store.list_sessions()
+    assert "00000000000000000000000000000001" not in sessions_after
+
+
+def test_purge_session_keeps_blocks_shared_with_other_sessions(store):
+    a = store.put(session=1, kind="fact", body="shared")
+    b = store.put(session=2, kind="fact", body="shared")
+    assert a == b
+    store.purge_session(1)
+    # The block survives in session 2.
+    block = store.show(b)
+    assert block.body == b"shared"

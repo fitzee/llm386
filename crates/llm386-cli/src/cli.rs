@@ -101,6 +101,25 @@ pub(crate) enum Command {
         store: PathBuf,
     },
 
+    /// Delete a single block or every block in a session.
+    /// Destructive — requires `--yes`.
+    Purge {
+        /// Path to the LMDB store.
+        #[arg(long)]
+        store: PathBuf,
+        /// Block id (decimal, hex with `0x`, or bare 32-char hex).
+        /// Mutually exclusive with --session.
+        #[arg(long, value_parser = parse_u128, conflicts_with = "session")]
+        block: Option<u128>,
+        /// Session id. Removes every block belonging to this session.
+        /// Mutually exclusive with --block.
+        #[arg(long, value_parser = parse_u128, conflicts_with = "block")]
+        session: Option<u128>,
+        /// Required confirmation flag for destructive operations.
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Print the full contents of a single block by id.
     Show {
         /// Path to the LMDB store.
