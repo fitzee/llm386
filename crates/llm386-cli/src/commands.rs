@@ -3,19 +3,21 @@
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use llm386_core::{
-    BlockId, BlockKind, BlockStore, ContentHash, ContextBlock, ModelProfile, Packer, PageRequest,
-    Pager, Provenance, SessionId, Timestamp, TokenCounts, Tokenizer, default_registry,
+    BlockId, BlockKind, BlockStore, CallId, ContentHash, ContextBlock, ModelProfile, Packer,
+    PageRequest, Pager, Provenance, SessionId, Timestamp, TokenCounts, Tokenizer, TraceRecord,
+    TraceSink, default_registry,
 };
 use llm386_packer::SimplePacker;
 use llm386_pager::GreedyPager;
 use llm386_store_lmdb::{LmdbStore, StoreConfig};
 use llm386_tokenizer::default_registry as tokenizer_registry;
+use llm386_trace::LmdbTraceSink;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, TraceSub};
 
 pub(crate) fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
@@ -40,7 +42,16 @@ pub(crate) fn dispatch(cli: Cli) -> Result<()> {
             model,
             task,
             prompt_only,
-        } => pack(&store, SessionId(session), &model, &task, prompt_only),
+            trace,
+        } => pack(
+            &store,
+            SessionId(session),
+            &model,
+            &task,
+            prompt_only,
+            trace.as_deref(),
+        ),
+        Command::Trace(TraceSub::Show { store, call_id }) => trace_show(&store, CallId(call_id)),
     }
 }
 
@@ -139,6 +150,7 @@ fn pack(
     model_name: &str,
     task: &str,
     prompt_only: bool,
+    trace_path: Option<&Path>,
 ) -> Result<()> {
     let (store, profile, tokenizer) = open_for_model(store_path, model_name)?;
     let pager = GreedyPager::new(store.clone(), tokenizer.clone());
@@ -150,8 +162,31 @@ fn pack(
         model: profile,
         required_blocks: vec![],
     };
+
+    let started_at = Timestamp(now_ms());
+    let started = Instant::now();
     let plan = pager.page(request.clone())?;
     let prompt = packer.pack(&request, &plan)?;
+    let duration_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+
+    let trace_id = if let Some(path) = trace_path {
+        let sink = LmdbTraceSink::open(path)
+            .with_context(|| format!("opening trace store at {}", path.display()))?;
+        let call_id = new_call_id();
+        sink.record(TraceRecord {
+            call_id,
+            session,
+            model: request.model.name.clone(),
+            plan: plan.clone(),
+            prompt_tokens: prompt.input_tokens,
+            prompt_hash: ContentHash::of(prompt.rendered.as_bytes()),
+            started_at,
+            duration_ms,
+        })?;
+        Some(call_id)
+    } else {
+        None
+    };
 
     if prompt_only {
         print!("{}", prompt.rendered);
@@ -159,8 +194,38 @@ fn pack(
         eprintln!("# model:         {}", prompt.model);
         eprintln!("# input_tokens:  {}", prompt.input_tokens);
         eprintln!("# blocks:        {}", prompt.blocks.len());
+        eprintln!("# duration_ms:   {duration_ms}");
+        if let Some(id) = trace_id {
+            eprintln!("# trace_id:      {id}");
+        }
         eprintln!("---");
         print!("{}", prompt.rendered);
+    }
+    Ok(())
+}
+
+fn trace_show(store_path: &Path, call_id: CallId) -> Result<()> {
+    let sink = LmdbTraceSink::open(store_path)
+        .with_context(|| format!("opening trace store at {}", store_path.display()))?;
+    let trace = sink
+        .fetch(call_id)?
+        .ok_or_else(|| anyhow!("no trace for {call_id}"))?;
+
+    println!("call_id:         {}", trace.call_id);
+    println!("session:         {}", trace.session);
+    println!("model:           {}", trace.model);
+    println!("started_at_ms:   {}", trace.started_at.0);
+    println!("duration_ms:     {}", trace.duration_ms);
+    println!("prompt_tokens:   {}", trace.prompt_tokens);
+    println!("prompt_hash:     {:?}", trace.prompt_hash);
+    println!("estimated:       {}", trace.plan.estimated_tokens);
+    println!("plan.selected ({}):", trace.plan.selected.len());
+    for id in &trace.plan.selected {
+        println!("  {id}");
+    }
+    println!("plan.omitted ({}):", trace.plan.omitted.len());
+    for o in &trace.plan.omitted {
+        println!("  {} ({:?}, score={:.4})", o.block_id, o.reason, o.score);
     }
     Ok(())
 }
@@ -198,4 +263,10 @@ fn new_block_id() -> BlockId {
     let mut buf = [0u8; 16];
     getrandom::fill(&mut buf).expect("getrandom should not fail");
     BlockId::from_parts(now_ms(), u128::from_be_bytes(buf))
+}
+
+fn new_call_id() -> CallId {
+    let mut buf = [0u8; 16];
+    getrandom::fill(&mut buf).expect("getrandom should not fail");
+    CallId(u128::from_be_bytes(buf))
 }

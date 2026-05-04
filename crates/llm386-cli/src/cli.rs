@@ -70,6 +70,27 @@ pub(crate) enum Command {
         /// Print only the rendered prompt (no header / manifest).
         #[arg(long)]
         prompt_only: bool,
+        /// Optional trace store path. When set, the call is recorded
+        /// and its CallId is printed on stderr.
+        #[arg(long)]
+        trace: Option<PathBuf>,
+    },
+
+    /// Inspect persisted traces.
+    #[command(subcommand)]
+    Trace(TraceSub),
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum TraceSub {
+    /// Show a single trace record by CallId.
+    Show {
+        /// Path to the trace store.
+        #[arg(long)]
+        store: PathBuf,
+        /// Call id (decimal, or `0x`-prefixed hex).
+        #[arg(value_parser = parse_u128)]
+        call_id: u128,
     },
 }
 
@@ -107,6 +128,10 @@ impl From<KindArg> for llm386_core::BlockKind {
 fn parse_u128(s: &str) -> Result<u128, String> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         u128::from_str_radix(hex, 16).map_err(|e| e.to_string())
+    } else if s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Bare 32-char hex matches the BlockId/SessionId/CallId Display
+        // form, so accept it without requiring the `0x` prefix.
+        u128::from_str_radix(s, 16).map_err(|e| e.to_string())
     } else {
         s.parse::<u128>().map_err(|e| e.to_string())
     }
@@ -122,5 +147,14 @@ mod tests {
         assert_eq!(parse_u128("0xff").unwrap(), 255);
         assert_eq!(parse_u128("0XFF").unwrap(), 255);
         assert!(parse_u128("not-a-number").is_err());
+    }
+
+    #[test]
+    fn parse_u128_accepts_bare_32_char_hex() {
+        let hex = "7b732fd4d8b1f1b734909ba162113e76";
+        assert_eq!(
+            parse_u128(hex).unwrap(),
+            u128::from_str_radix(hex, 16).unwrap()
+        );
     }
 }
