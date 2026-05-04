@@ -701,6 +701,15 @@ dependencies = [
 [[package]]
 name = "llm386-trace"
 version = "0.1.0"
+dependencies = [
+ "heed",
+ "llm386-core",
+ "postcard",
+ "serde",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
 
 [[package]]
 name = "lmdb-master-sys"

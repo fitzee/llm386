@@ -6,9 +6,18 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Observability and replay for LLM386."
+description = "Observability and replay storage for LLM386."
 
 [lints]
 workspace = true
 
 [dependencies]
+llm386-core = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+tracing = { workspace = true }
+heed = "0.22"
+
+[dev-dependencies]
+tempfile = { workspace = true }
