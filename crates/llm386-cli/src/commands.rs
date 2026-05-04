@@ -10,11 +10,13 @@ use llm386_compress::{NoopSummarizer, TruncatingSummarizer};
 use llm386_compress_anthropic::AnthropicSummarizer;
 use llm386_core::{
     BlockId, BlockKind, BlockStore, CallId, ContentHash, ContextBlock, ModelProfile, ModelRegistry,
-    Packer, PageRequest, Pager, Provenance, SessionId, Summarizer, Timestamp, TokenCounts,
-    Tokenizer, TokenizerId, TraceRecord, TraceSink, default_registry,
+    Packer, PageRequest, Pager, Provenance, Retriever, SessionId, Summarizer, Timestamp,
+    TokenCounts, Tokenizer, TokenizerId, TraceRecord, TraceSink, default_registry,
 };
 use llm386_packer::SimplePacker;
-use llm386_pager::GreedyPager;
+use llm386_pager::{
+    Bm25Retriever, GreedyPager, LexicalRetriever, RecencyRetriever, SessionRetriever,
+};
 use llm386_store_lmdb::{LmdbStore, StoreConfig};
 use llm386_tokenizer::{HfTokenizer, TokenizerRegistry, default_registry as tokenizer_registry};
 use llm386_trace::LmdbTraceSink;
@@ -26,10 +28,13 @@ const PROFILES_ENV: &str = "LLM386_PROFILES";
 
 /// Bundle of registries the CLI hands off to every subcommand
 /// handler. Built once at startup from defaults + (optional) user
-/// config file.
+/// config file. Retrievers can't be pre-built because they hold a
+/// store reference — the CLI rebuilds them per-command from
+/// `retriever_entries`.
 pub(crate) struct LoadedConfig {
     pub models: ModelRegistry,
     pub tokenizers: TokenizerRegistry,
+    pub retriever_entries: Vec<RetrieverEntry>,
 }
 
 /// Load the built-in registries, then merge in any user-supplied
@@ -39,6 +44,7 @@ pub(crate) struct LoadedConfig {
 pub(crate) fn load_config(flag_path: Option<&Path>) -> Result<LoadedConfig> {
     let mut models = default_registry();
     let mut tokenizers = tokenizer_registry().context("initializing default tokenizer registry")?;
+    let mut retriever_entries: Vec<RetrieverEntry> = Vec::new();
 
     let path = flag_path
         .map(Path::to_path_buf)
@@ -62,15 +68,21 @@ pub(crate) fn load_config(flag_path: Option<&Path>) -> Result<LoadedConfig> {
                 })?;
             tokenizers.register(Arc::new(tok));
         }
+        retriever_entries = parsed.retrievers;
     }
 
-    Ok(LoadedConfig { models, tokenizers })
+    Ok(LoadedConfig {
+        models,
+        tokenizers,
+        retriever_entries,
+    })
 }
 
 #[derive(Default)]
 struct ParsedConfig {
     profiles: Vec<ModelProfile>,
     hf_tokenizers: Vec<HfTokenizerEntry>,
+    retrievers: Vec<RetrieverEntry>,
 }
 
 #[derive(Deserialize)]
@@ -79,6 +91,8 @@ struct ConfigFile {
     profile: Vec<ModelProfile>,
     #[serde(default)]
     hf_tokenizer: Vec<HfTokenizerEntry>,
+    #[serde(default)]
+    retriever: Vec<RetrieverEntry>,
 }
 
 #[derive(Deserialize)]
@@ -87,12 +101,93 @@ struct HfTokenizerEntry {
     path: std::path::PathBuf,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct RetrieverEntry {
+    pub kind: String,
+    /// RecencyRetriever: switch to exponential decay if set.
+    #[serde(default)]
+    pub half_life_secs: Option<f32>,
+    /// LexicalRetriever / Bm25Retriever: minimum query/document
+    /// token length.
+    #[serde(default)]
+    pub min_word_len: Option<usize>,
+    /// Bm25Retriever: term-frequency saturation parameter.
+    #[serde(default)]
+    pub k1: Option<f32>,
+    /// Bm25Retriever: length-normalization parameter.
+    #[serde(default)]
+    pub b: Option<f32>,
+    /// SessionRetriever: flat baseline score for every block.
+    #[serde(default)]
+    pub score: Option<f32>,
+}
+
 fn parse_config_toml(s: &str) -> Result<ParsedConfig> {
     let parsed: ConfigFile = toml::from_str(s)?;
     Ok(ParsedConfig {
         profiles: parsed.profile,
         hf_tokenizers: parsed.hf_tokenizer,
+        retrievers: parsed.retriever,
     })
+}
+
+/// Materialize the retriever set declared in the config, bound to
+/// `store`. Returns `None` when no `[[retriever]]` entries were
+/// configured — callers fall back to the GreedyPager default
+/// (RecencyRetriever).
+fn build_retrievers(
+    entries: &[RetrieverEntry],
+    store: &Arc<LmdbStore>,
+) -> Result<Option<Vec<Arc<dyn Retriever>>>> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let mut out: Vec<Arc<dyn Retriever>> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let r: Arc<dyn Retriever> = match entry.kind.as_str() {
+            "recency" => {
+                let mut r = RecencyRetriever::new(store.clone());
+                if let Some(h) = entry.half_life_secs {
+                    r = r.with_half_life(h);
+                }
+                Arc::new(r)
+            }
+            "lexical" => {
+                let mut r = LexicalRetriever::new(store.clone());
+                if let Some(n) = entry.min_word_len {
+                    r = r.with_min_word_len(n);
+                }
+                Arc::new(r)
+            }
+            "bm25" => {
+                let mut r = Bm25Retriever::new(store.clone());
+                if let Some(k) = entry.k1 {
+                    r = r.with_k1(k);
+                }
+                if let Some(b) = entry.b {
+                    r = r.with_b(b);
+                }
+                if let Some(n) = entry.min_word_len {
+                    r = r.with_min_word_len(n);
+                }
+                Arc::new(r)
+            }
+            "session" => {
+                let mut r = SessionRetriever::new(store.clone());
+                if let Some(s) = entry.score {
+                    r = r.with_score(s);
+                }
+                Arc::new(r)
+            }
+            other => {
+                return Err(anyhow!(
+                    "unknown retriever kind `{other}`; expected one of: recency, lexical, bm25, session",
+                ));
+            }
+        };
+        out.push(r);
+    }
+    Ok(Some(out))
 }
 
 pub(crate) fn dispatch(command: Command, config: &LoadedConfig) -> Result<()> {
@@ -231,7 +326,10 @@ fn page(
     config: &LoadedConfig,
 ) -> Result<()> {
     let (store, profile, tokenizer) = open_for_model(store_path, model_name, config)?;
-    let pager = GreedyPager::new(store, tokenizer);
+    let mut pager = GreedyPager::new(store.clone(), tokenizer);
+    if let Some(retrievers) = build_retrievers(&config.retriever_entries, &store)? {
+        pager = pager.with_retrievers(retrievers);
+    }
     let plan = pager.page(PageRequest {
         session_id: session,
         task: task.to_string(),
@@ -271,7 +369,10 @@ fn pack(
     config: &LoadedConfig,
 ) -> Result<()> {
     let (store, profile, tokenizer) = open_for_model(store_path, model_name, config)?;
-    let pager = GreedyPager::new(store.clone(), tokenizer.clone());
+    let mut pager = GreedyPager::new(store.clone(), tokenizer.clone());
+    if let Some(retrievers) = build_retrievers(&config.retriever_entries, &store)? {
+        pager = pager.with_retrievers(retrievers);
+    }
     let packer = SimplePacker::new(store, tokenizer);
 
     let request = PageRequest {
@@ -628,6 +729,37 @@ max_context_tokens = 100
 reserved_output_tokens = 10
 "#;
         assert!(parse_config_toml(s).is_err());
+    }
+
+    #[test]
+    fn parse_config_toml_loads_retriever_entries() {
+        let s = r#"
+[[retriever]]
+kind = "recency"
+half_life_secs = 60.0
+
+[[retriever]]
+kind = "bm25"
+k1 = 1.5
+b = 0.5
+min_word_len = 3
+
+[[retriever]]
+kind = "lexical"
+
+[[retriever]]
+kind = "session"
+score = 0.25
+"#;
+        let parsed = parse_config_toml(s).unwrap();
+        assert_eq!(parsed.retrievers.len(), 4);
+        assert_eq!(parsed.retrievers[0].kind, "recency");
+        assert_eq!(parsed.retrievers[0].half_life_secs, Some(60.0));
+        assert_eq!(parsed.retrievers[1].kind, "bm25");
+        assert_eq!(parsed.retrievers[1].k1, Some(1.5));
+        assert_eq!(parsed.retrievers[2].kind, "lexical");
+        assert_eq!(parsed.retrievers[3].kind, "session");
+        assert_eq!(parsed.retrievers[3].score, Some(0.25));
     }
 
     #[test]
