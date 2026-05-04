@@ -15,7 +15,7 @@
 //! "kept" block whose inclusion reason changed (e.g. promoted from
 //! `HighRelevance` to `Pinned`) shows up with both reasons.
 
-#![doc(html_root_url = "https://docs.rs/llm386-diff/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/llm386-diff/1.0.0-alpha")]
 
 use std::collections::HashMap;
 

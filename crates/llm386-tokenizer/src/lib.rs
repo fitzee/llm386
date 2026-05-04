@@ -3,7 +3,7 @@
 //! Concrete `Tokenizer` implementations live here; the trait itself
 //! is defined in `llm386-core`.
 
-#![doc(html_root_url = "https://docs.rs/llm386-tokenizer/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/llm386-tokenizer/1.0.0-alpha")]
 
 mod cache;
 mod huggingface;

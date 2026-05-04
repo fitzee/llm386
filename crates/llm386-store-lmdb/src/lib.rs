@@ -5,7 +5,7 @@
 //! binding. Blocks are content-hash deduplicated and indexed by both
 //! id and session.
 
-#![doc(html_root_url = "https://docs.rs/llm386-store-lmdb/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/llm386-store-lmdb/1.0.0-alpha")]
 
 mod store;
 

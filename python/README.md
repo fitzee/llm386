@@ -18,7 +18,7 @@ maturin develop
 
 ## Status
 
-PyO3 bindings (v0.2). The previous v0.1 was a CLI-shelling pure-Python wrapper; the public API is the same so code from v0.1 keeps working.
+Alpha (`1.0.0a0`). The package is a PyO3 native extension; the surface mirrors the earlier CLI-shelling pure-Python wrapper so existing code keeps working.
 
 Custom retrievers written in Python work today (see "Custom Python retrievers" below). Embedder and Summarizer Python adapters follow the same pattern and land next.
 

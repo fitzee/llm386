@@ -4,7 +4,7 @@
 //! persists [`TraceRecord`]s to LMDB so a page+pack invocation can
 //! be inspected or replayed after the fact.
 
-#![doc(html_root_url = "https://docs.rs/llm386-trace/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/llm386-trace/1.0.0-alpha")]
 
 mod lmdb;
 

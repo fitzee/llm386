@@ -13,7 +13,7 @@
 //! belongs alongside whichever Anthropic / OpenAI client a downstream
 //! application already uses, behind the same `Summarizer` trait.
 
-#![doc(html_root_url = "https://docs.rs/llm386-compress/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/llm386-compress/1.0.0-alpha")]
 
 mod noop;
 mod truncating;

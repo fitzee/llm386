@@ -15,7 +15,7 @@
 //! you don't want the OpenAI dep, or bring your own retriever if
 //! you want HNSW. The trait surface is the same.
 
-#![doc(html_root_url = "https://docs.rs/llm386-retrieve-ann/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/llm386-retrieve-ann/1.0.0-alpha")]
 
 mod cache;
 mod hnsw;

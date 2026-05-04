@@ -5,7 +5,7 @@
 //! weighted greedy pager; section budgets and richer scoring will
 //! land in follow-on phases.
 
-#![doc(html_root_url = "https://docs.rs/llm386-pager/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/llm386-pager/1.0.0-alpha")]
 
 mod budget;
 mod greedy;

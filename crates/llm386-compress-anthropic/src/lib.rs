@@ -15,7 +15,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/llm386-compress-anthropic/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/llm386-compress-anthropic/1.0.0-alpha")]
 
 use std::fmt;
 use std::fmt::Write as _;

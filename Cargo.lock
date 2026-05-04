@@ -1168,7 +1168,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "llm386-cli"
-version = "0.1.0"
+version = "1.0.0-alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "llm386-compress"
-version = "0.1.0"
+version = "1.0.0-alpha"
 dependencies = [
  "llm386-core",
  "thiserror",
@@ -1199,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "llm386-compress-anthropic"
-version = "0.1.0"
+version = "1.0.0-alpha"
 dependencies = [
  "llm386-core",
  "reqwest",
@@ -1209,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "llm386-core"
-version = "0.1.0"
+version = "1.0.0-alpha"
 dependencies = [
  "blake3",
  "serde",
@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "llm386-diff"
-version = "0.1.0"
+version = "1.0.0-alpha"
 dependencies = [
  "llm386-core",
  "serde",
@@ -1226,7 +1226,7 @@ dependencies = [
 
 [[package]]
 name = "llm386-packer"
-version = "0.1.0"
+version = "1.0.0-alpha"
 dependencies = [
  "llm386-core",
  "llm386-pager",
@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "llm386-pager"
-version = "0.1.0"
+version = "1.0.0-alpha"
 dependencies = [
  "criterion",
  "llm386-core",
@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "llm386-reduce"
-version = "0.1.0"
+version = "1.0.0-alpha"
 dependencies = [
  "blake3",
  "llm386-core",
@@ -1263,7 +1263,7 @@ dependencies = [
 
 [[package]]
 name = "llm386-retrieve-ann"
-version = "0.1.0"
+version = "1.0.0-alpha"
 dependencies = [
  "heed",
  "instant-distance",
@@ -1279,7 +1279,7 @@ dependencies = [
 
 [[package]]
 name = "llm386-store-lmdb"
-version = "0.1.0"
+version = "1.0.0-alpha"
 dependencies = [
  "heed",
  "llm386-core",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "llm386-tokenizer"
-version = "0.1.0"
+version = "1.0.0-alpha"
 dependencies = [
  "criterion",
  "llm386-core",
@@ -1306,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "llm386-trace"
-version = "0.1.0"
+version = "1.0.0-alpha"
 dependencies = [
  "heed",
  "llm386-core",

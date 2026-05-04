@@ -1,5 +1,12 @@
 # LLM386
 
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
+[![Edition](https://img.shields.io/badge/edition-2024-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
+[![Status](https://img.shields.io/badge/status-alpha-yellow.svg)](#status)
+[![Last commit](https://img.shields.io/github/last-commit/fitzee/llm386)](https://github.com/fitzee/llm386/commits/main)
+[![Stars](https://img.shields.io/github/stars/fitzee/llm386?style=social)](https://github.com/fitzee/llm386/stargazers)
+
 A Rust runtime that manages the external state needed to feed an LLM. It treats the model as a stateless inference function and handles the rest: persistent block storage, retrieval, paging into a model-specific token budget, and deterministic prompt assembly.
 
 **Core invariant.** LLM386 does not extend the model's context window. It constructs a bounded working set for each call by selecting, ordering, and rendering blocks from a larger persistent memory. Every model invocation is independent; continuity is achieved by recomputing the working set each time.

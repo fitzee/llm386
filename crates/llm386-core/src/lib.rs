@@ -5,7 +5,7 @@
 //! storage, retrieval, paging, packing, and tracing implementations in
 //! their respective sibling crates.
 
-#![doc(html_root_url = "https://docs.rs/llm386-core/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/llm386-core/1.0.0-alpha")]
 
 mod block;
 mod edge;

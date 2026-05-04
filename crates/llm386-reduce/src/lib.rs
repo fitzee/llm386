@@ -20,7 +20,7 @@
 //!
 //! All three are deterministic on `(state, output)`.
 
-#![doc(html_root_url = "https://docs.rs/llm386-reduce/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/llm386-reduce/1.0.0-alpha")]
 
 mod identity;
 mod json_events;
