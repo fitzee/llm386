@@ -2,14 +2,13 @@
 
 use thiserror::Error;
 
-use crate::model::ModelProfile;
 use crate::packed::PackedPrompt;
-use crate::page::PagePlan;
+use crate::page::{PagePlan, PageRequest};
 use crate::store::StoreError;
 use crate::tokenizer::TokenizerError;
 
 pub trait Packer: Send + Sync {
-    fn pack(&self, plan: &PagePlan, model: &ModelProfile) -> Result<PackedPrompt, PackerError>;
+    fn pack(&self, request: &PageRequest, plan: &PagePlan) -> Result<PackedPrompt, PackerError>;
 }
 
 #[derive(Debug, Error)]
