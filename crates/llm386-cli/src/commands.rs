@@ -111,7 +111,8 @@ pub(crate) fn dispatch(command: Command, config: &LoadedConfig) -> Result<()> {
             session,
             model,
             task,
-        } => page(&store, SessionId(session), &model, &task, config),
+            json,
+        } => page(&store, SessionId(session), &model, &task, json, config),
         Command::Pack {
             store,
             session,
@@ -132,7 +133,7 @@ pub(crate) fn dispatch(command: Command, config: &LoadedConfig) -> Result<()> {
         ),
         Command::Trace(TraceSub::Show { store, call_id }) => trace_show(&store, CallId(call_id)),
         Command::ListSessions { store } => list_sessions(&store),
-        Command::Show { store, id } => show(&store, BlockId(id)),
+        Command::Show { store, id, json } => show(&store, BlockId(id), json),
         Command::Summarize {
             store,
             session,
@@ -226,6 +227,7 @@ fn page(
     session: SessionId,
     model_name: &str,
     task: &str,
+    json: bool,
     config: &LoadedConfig,
 ) -> Result<()> {
     let (store, profile, tokenizer) = open_for_model(store_path, model_name, config)?;
@@ -236,6 +238,14 @@ fn page(
         model: profile,
         required_blocks: vec![],
     })?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&plan).context("serializing plan")?
+        );
+        return Ok(());
+    }
 
     println!("selected ({}):", plan.selected.len());
     for id in &plan.selected {
@@ -414,12 +424,20 @@ fn list_sessions(store_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn show(store_path: &Path, id: BlockId) -> Result<()> {
+fn show(store_path: &Path, id: BlockId, json: bool) -> Result<()> {
     let store = LmdbStore::open(store_path, StoreConfig::default())
         .with_context(|| format!("opening store at {}", store_path.display()))?;
     let block = store
         .get(id)?
         .ok_or_else(|| anyhow!("block not found: {id}"))?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&block).context("serializing block")?
+        );
+        return Ok(());
+    }
 
     println!("id:            {}", block.id);
     println!("kind:          {:?}", block.kind);

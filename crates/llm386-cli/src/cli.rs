@@ -62,6 +62,9 @@ pub(crate) enum Command {
         model: String,
         #[arg(long)]
         task: String,
+        /// Print the PagePlan as JSON instead of the human table.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Run page + pack and print the resulting prompt.
@@ -106,6 +109,9 @@ pub(crate) enum Command {
         /// Block id (decimal, hex with `0x`, or bare 32-char hex).
         #[arg(value_parser = parse_u128)]
         id: u128,
+        /// Print the ContextBlock as JSON instead of the human view.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Summarize a session's blocks via the configured summarizer.
