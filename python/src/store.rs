@@ -23,7 +23,11 @@ use llm386_tokenizer::{TokenizerRegistry, default_registry as default_tokenizers
 use llm386_trace::LmdbTraceSink;
 
 use crate::config;
+use crate::python_traits::wrap_retriever;
 use crate::types::{ChatMessage, ContextBlock, PackResult, PagePlan, TraceRecord};
+
+use llm386_core::Retriever;
+use parking_lot::RwLock;
 
 create_exception!(llm386, LLM386Error, PyException);
 
@@ -33,6 +37,7 @@ pub struct Store {
     tokenizers: TokenizerRegistry,
     models: ModelRegistry,
     retriever_entries: Vec<config::RetrieverEntry>,
+    python_retrievers: RwLock<Vec<Arc<dyn Retriever>>>,
 }
 
 #[pymethods]
@@ -61,7 +66,31 @@ impl Store {
         } else {
             Vec::new()
         };
-        Ok(Self { inner, tokenizers, models, retriever_entries })
+        Ok(Self {
+            inner,
+            tokenizers,
+            models,
+            retriever_entries,
+            python_retrievers: RwLock::new(Vec::new()),
+        })
+    }
+
+    /// Register a Python object as a retriever. The object must
+    /// expose a `name: str` attribute and a
+    /// `retrieve(session: int, task: str, limit: int)` method that
+    /// returns `list[tuple[str, float]]` (block-id hex string +
+    /// score). The retriever runs alongside any TOML-configured
+    /// retrievers and the default RecencyRetriever fallback,
+    /// merged by max score per BlockId.
+    fn add_python_retriever(&self, py: Python<'_>, obj: Py<PyAny>) -> PyResult<()> {
+        let wrapped = wrap_retriever(py, obj)?;
+        self.python_retrievers.write().push(wrapped);
+        Ok(())
+    }
+
+    /// Drop every previously-registered Python retriever.
+    fn clear_python_retrievers(&self) {
+        self.python_retrievers.write().clear();
     }
 
     /// Insert a block. Returns the assigned BlockId (32-char hex).
@@ -144,9 +173,11 @@ impl Store {
     fn page(&self, session: u128, model: &str, task: &str) -> PyResult<PagePlan> {
         let (profile, tokenizer) = self.profile_and_tokenizer(model)?;
         let mut pager = GreedyPager::new(self.inner.clone(), tokenizer);
-        if let Some(retrievers) = config::build_retrievers(&self.retriever_entries, &self.inner)
+        let mut retrievers = config::build_retrievers(&self.retriever_entries, &self.inner)
             .map_err(LLM386Error::new_err)?
-        {
+            .unwrap_or_default();
+        retrievers.extend(self.python_retrievers.read().iter().cloned());
+        if !retrievers.is_empty() {
             pager = pager.with_retrievers(retrievers);
         }
         let request = PageRequest {
@@ -172,9 +203,11 @@ impl Store {
     ) -> PyResult<PackResult> {
         let (profile, tokenizer) = self.profile_and_tokenizer(model)?;
         let mut pager = GreedyPager::new(self.inner.clone(), tokenizer.clone());
-        if let Some(retrievers) = config::build_retrievers(&self.retriever_entries, &self.inner)
+        let mut retrievers = config::build_retrievers(&self.retriever_entries, &self.inner)
             .map_err(LLM386Error::new_err)?
-        {
+            .unwrap_or_default();
+        retrievers.extend(self.python_retrievers.read().iter().cloned());
+        if !retrievers.is_empty() {
             pager = pager.with_retrievers(retrievers);
         }
         let packer = SimplePacker::new(self.inner.clone(), tokenizer);

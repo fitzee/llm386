@@ -9,6 +9,7 @@
 use pyo3::prelude::*;
 
 mod config;
+mod python_traits;
 mod store;
 mod types;
 

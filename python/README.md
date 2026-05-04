@@ -20,7 +20,7 @@ maturin develop
 
 PyO3 bindings (v0.2). The previous v0.1 was a CLI-shelling pure-Python wrapper; the public API is the same so code from v0.1 keeps working.
 
-Custom retrievers, embedders, and summarizers written in Python (subclassing the trait) are on the roadmap for v0.3. For now, only the Rust-side implementations are exposed.
+Custom retrievers written in Python work today (see "Custom Python retrievers" below). Embedder and Summarizer Python adapters follow the same pattern and land next.
 
 ## Quick start
 
@@ -133,6 +133,33 @@ print(store.summarize(session=1, summarizer="truncating", max_chars=80))
 # Via Anthropic Claude (set ANTHROPIC_API_KEY):
 print(store.summarize(session=1, summarizer="anthropic", store_summary=True))
 ```
+
+## Custom Python retrievers
+
+Write a class with a `name` attribute and a `retrieve(session, task, limit)` method that returns a list of `(block_id_hex, score)` tuples. Register it on the Store, and the Rust pager calls back into your code as part of every `page()` / `pack()`.
+
+```python
+from llm386 import Store
+
+class FavoritesRetriever:
+    name = "favorites"
+
+    def __init__(self, favored_ids: list[str]):
+        self.favored_ids = favored_ids
+
+    def retrieve(self, session: int, task: str, limit: int):
+        return [(bid, 1.0) for bid in self.favored_ids[:limit]]
+
+store = Store("./store")
+store.add_python_retriever(FavoritesRetriever(["019abc..."]))
+plan = store.page(session=1, model="gpt-4o", task="anything")
+```
+
+Python retrievers compose alongside any TOML-configured retrievers and the default `RecencyRetriever` fallback. Scores are clamped to `[0, 1]` and merged by `BlockId` (max wins).
+
+`store.clear_python_retrievers()` drops everything previously registered.
+
+For Pinecone, Weaviate, or any other vector DB, this is the integration point: implement `retrieve` against your client.
 
 ## API surface
 

@@ -28,6 +28,7 @@ llm386-trace = { path = "../crates/llm386-trace" }
 llm386-compress = { path = "../crates/llm386-compress" }
 llm386-compress-anthropic = { path = "../crates/llm386-compress-anthropic" }
 getrandom = "0.4"
+parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 llm386-retrieve-ann = { path = "../crates/llm386-retrieve-ann" }

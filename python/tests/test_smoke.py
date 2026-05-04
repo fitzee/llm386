@@ -159,6 +159,70 @@ def test_store_with_invalid_retriever_kind_raises(tmp_path):
         store.page(session=1, model="gpt-4o", task="x")
 
 
+def test_python_retriever_runs_inside_pager(store):
+    """A user-defined Python retriever can surface custom blocks
+    into the pager's candidate set."""
+
+    favored_id = store.put(session=1, kind="fact", body="favored block")
+    store.put(session=1, kind="fact", body="other block")
+
+    class FavoritesRetriever:
+        name = "favorites"
+
+        def retrieve(self, session, task, limit):
+            # Always boost the favored block to the top.
+            return [(favored_id, 1.0)]
+
+    store.add_python_retriever(FavoritesRetriever())
+    plan = store.page(session=1, model="gpt-4o", task="anything")
+    assert favored_id in plan.selected
+    # Highest-scored block is ours.
+    assert plan.selected[0] == favored_id
+
+
+def test_python_retriever_missing_name_raises(store):
+    class BadRetriever:
+        def retrieve(self, session, task, limit):
+            return []
+
+    with pytest.raises(AttributeError):
+        store.add_python_retriever(BadRetriever())
+
+
+def test_python_retriever_returning_bad_shape_raises(store):
+    store.put(session=1, kind="fact", body="x")
+
+    class BrokenRetriever:
+        name = "broken"
+
+        def retrieve(self, session, task, limit):
+            # Wrong shape: list of strings instead of tuples.
+            return ["not a tuple"]
+
+    store.add_python_retriever(BrokenRetriever())
+    with pytest.raises(LLM386Error):
+        store.page(session=1, model="gpt-4o", task="x")
+
+
+def test_clear_python_retrievers_removes_them(store):
+    favored_id = store.put(session=1, kind="fact", body="favored")
+    store.put(session=1, kind="fact", body="other")
+
+    class FavoritesRetriever:
+        name = "favorites"
+
+        def retrieve(self, session, task, limit):
+            return [(favored_id, 1.0)]
+
+    store.add_python_retriever(FavoritesRetriever())
+    store.clear_python_retrievers()
+    plan = store.page(session=1, model="gpt-4o", task="x")
+    # Without the booster, ordering reverts to the default
+    # RecencyRetriever — favored_id was inserted first so it ranks
+    # lowest, not highest.
+    assert plan.selected[0] != favored_id
+
+
 def test_summarize_truncating_returns_text(store):
     for i in range(3):
         store.put(session=1, kind="fact", body=f"fact number {i}")
