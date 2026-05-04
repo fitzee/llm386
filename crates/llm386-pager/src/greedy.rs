@@ -19,42 +19,51 @@ use crate::retrievers::RecencyRetriever;
 /// later if it becomes a bottleneck for large sessions.
 const RETRIEVAL_LIMIT: usize = 4_096;
 
-/// Weights for the per-block score function.
+/// Weights for the per-block score function and redundancy policy.
 ///
 /// Final score = `max_retriever_score + priority_weight * block.priority`.
-/// Recency-style ranking now lives in [`RecencyRetriever`]; tune it
+/// Recency-style ranking lives in [`RecencyRetriever`]; tune it
 /// there (or swap in a different retriever) rather than via a weight
 /// here.
+///
+/// `redundancy_threshold` enables word-set Jaccard deduplication
+/// inside each section. `Some(t)` means a candidate is omitted (with
+/// [`OmissionReason::Redundant`]) when its body's whitespace-token
+/// set has Jaccard similarity ≥ `t` with any block already selected
+/// in the same section. `None` (the default) disables the check.
 #[derive(Clone, Copy, Debug)]
 pub struct ScoringPolicy {
     pub priority_weight: f32,
+    pub redundancy_threshold: Option<f32>,
 }
 
 impl Default for ScoringPolicy {
     fn default() -> Self {
         Self {
             priority_weight: 0.5,
+            redundancy_threshold: None,
         }
     }
 }
 
-/// Recency-weighted greedy [`Pager`] with per-section budgets.
+/// Recency-weighted greedy [`Pager`] with per-section budgets and
+/// optional redundancy filtering.
 ///
 /// Pipeline:
 /// 1. Resolve required blocks (always selected; error if any does
 ///    not exist or if their total exceeds `input_budget`).
 /// 2. Reserve fixed budget for the synthesized Task string.
-/// 3. Reserve fixed budget for `System` blocks (greedy fill until
-///    full).
-/// 4. Allocate the *variable* budget across the remaining sections
+/// 3. Fan out across `self.retrievers`, merging candidates by
+///    `BlockId` (max score wins).
+/// 4. Reserve fixed budget for `System` blocks (greedy fill).
+/// 5. Allocate the *variable* budget across the remaining sections
 ///    via [`SectionBudgetTable`] (Recent / Retrieved / Tools / Plan
 ///    / State / Background, with `Slack` reserved as headroom).
-/// 5. Within each section, greedy-fill by score-per-token descending.
-///    Blocks that don't fit land in [`PagePlan::omitted`] with
-///    [`OmissionReason::Budget`].
-///
-/// Multi-retriever fan-in and redundancy detection still live in
-/// later phases.
+/// 6. Within each section, greedy-fill by score-per-token descending.
+///    Optionally drop word-set-similar duplicates
+///    ([`ScoringPolicy::redundancy_threshold`]). Blocks that don't
+///    fit land in [`PagePlan::omitted`] with the corresponding
+///    [`OmissionReason`].
 pub struct GreedyPager<S: BlockStore> {
     store: Arc<S>,
     tokenizer: Arc<dyn Tokenizer>,
@@ -192,6 +201,9 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
         }
 
         // Load each surviving candidate and classify by section.
+        // The candidate's word set is computed up front when
+        // redundancy filtering is on — saves a re-load later.
+        let dedup_on = self.scoring.redundancy_threshold.is_some();
         let mut by_section: HashMap<SectionKind, Vec<Candidate>> = HashMap::new();
         for (id, base_score) in retriever_score {
             let block: ContextBlock = match self.store.get(id)? {
@@ -201,6 +213,11 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
             let tokens = self.tokens_for(&block)?;
             let priority = block.priority.clamp(0.0, 1.0);
             let final_score = base_score + self.scoring.priority_weight * priority;
+            let word_set = if dedup_on {
+                Some(word_set(&block.bytes))
+            } else {
+                None
+            };
             by_section
                 .entry(block.kind.default_section())
                 .or_default()
@@ -208,6 +225,7 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
                     id: block.id,
                     tokens,
                     score: final_score,
+                    word_set,
                 });
         }
         for cands in by_section.values_mut() {
@@ -251,7 +269,23 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
             }
             let section_budget = allocation.for_section(section);
             let mut section_used = TokenCount::ZERO;
+            let mut section_word_sets: Vec<HashSet<String>> = Vec::new();
             for cand in cands {
+                if let (Some(threshold), Some(cand_set)) =
+                    (self.scoring.redundancy_threshold, cand.word_set.as_ref())
+                {
+                    let is_redundant = section_word_sets
+                        .iter()
+                        .any(|sel| jaccard(cand_set, sel) >= threshold);
+                    if is_redundant {
+                        omitted.push(OmittedBlock {
+                            block_id: cand.id,
+                            reason: OmissionReason::Redundant,
+                            score: cand.score,
+                        });
+                        continue;
+                    }
+                }
                 let next_section = section_used.saturating_add(cand.tokens);
                 let next_global = prompt_total.saturating_add(cand.tokens);
                 if next_section.0 <= section_budget.0 && next_global.0 <= input_budget.0 {
@@ -259,6 +293,9 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
                     prompt_total = next_global;
                     block_tokens = block_tokens.saturating_add(cand.tokens);
                     selected.push(cand.id);
+                    if let Some(set) = cand.word_set {
+                        section_word_sets.push(set);
+                    }
                 } else {
                     omitted.push(OmittedBlock {
                         block_id: cand.id,
@@ -311,6 +348,25 @@ struct Candidate {
     id: BlockId,
     tokens: TokenCount,
     score: f32,
+    word_set: Option<HashSet<String>>,
+}
+
+fn word_set(bytes: &[u8]) -> HashSet<String> {
+    std::str::from_utf8(bytes)
+        .unwrap_or("")
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect()
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f32 {
+    let intersection = a.intersection(b).count();
+    let union = a.union(b).count();
+    if union == 0 {
+        return 0.0;
+    }
+    (intersection as f32) / (union as f32)
 }
 
 #[cfg(test)]
@@ -544,6 +600,76 @@ mod tests {
             .unwrap();
         assert!(plan2.selected.is_empty());
         assert_eq!(plan2.omitted.len(), 6);
+    }
+
+    #[test]
+    fn redundancy_threshold_drops_word_similar_blocks() {
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        // Two near-identical blocks (only one word differs).
+        let id_first = store
+            .put(
+                session,
+                block(b"the cat sat on the mat", BlockKind::UserMessage, 1, 1),
+            )
+            .unwrap();
+        let _id_dup = store
+            .put(
+                session,
+                block(b"the cat sat on the rug", BlockKind::UserMessage, 2, 2),
+            )
+            .unwrap();
+        // Aggressive threshold (0.5 — five-of-six tokens match).
+        let policy = ScoringPolicy {
+            redundancy_threshold: Some(0.5),
+            ..ScoringPolicy::default()
+        };
+        let pager = GreedyPager::new(store, tok).with_scoring(policy);
+        let plan = pager
+            .page(PageRequest {
+                session_id: session,
+                task: String::new(),
+                model: profile(1_000, 0),
+                required_blocks: vec![],
+            })
+            .unwrap();
+        // Whichever the pager picks first wins; the other gets
+        // dropped as redundant.
+        assert_eq!(plan.selected.len(), 1);
+        assert_eq!(plan.omitted.len(), 1);
+        assert_eq!(plan.omitted[0].reason, OmissionReason::Redundant);
+        // And the dedup'd id must be the unselected one.
+        assert_ne!(plan.omitted[0].block_id, plan.selected[0]);
+        let _ = id_first;
+    }
+
+    #[test]
+    fn redundancy_disabled_by_default_keeps_similar_blocks() {
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        store
+            .put(
+                session,
+                block(b"the cat sat on the mat", BlockKind::UserMessage, 1, 1),
+            )
+            .unwrap();
+        store
+            .put(
+                session,
+                block(b"the cat sat on the rug", BlockKind::UserMessage, 2, 2),
+            )
+            .unwrap();
+        let pager = GreedyPager::new(store, tok); // default policy
+        let plan = pager
+            .page(PageRequest {
+                session_id: session,
+                task: String::new(),
+                model: profile(1_000, 0),
+                required_blocks: vec![],
+            })
+            .unwrap();
+        assert_eq!(plan.selected.len(), 2);
+        assert!(plan.omitted.is_empty());
     }
 
     #[test]
