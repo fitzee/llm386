@@ -49,3 +49,33 @@ pub struct PackedPrompt {
     pub blocks: Vec<PackedBlock>,
     pub rendered: String,
 }
+
+/// Role of a single message in a chat-formatted prompt.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatRole {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+/// One role-tagged message in a chat-formatted prompt.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: ChatRole,
+    pub content: String,
+}
+
+/// Chat-formatted equivalent of [`PackedPrompt`] for chat-API models
+/// (OpenAI, Anthropic, etc.).
+///
+/// `messages` is the role-tagged sequence to send. `input_tokens`
+/// is the total tokenized cost across every message content (the
+/// packer guarantees `input_tokens <= ModelProfile::input_budget`).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ChatPrompt {
+    pub model: String,
+    pub input_tokens: TokenCount,
+    pub messages: Vec<ChatMessage>,
+}

@@ -42,6 +42,7 @@ pub(crate) fn dispatch(cli: Cli) -> Result<()> {
             model,
             task,
             prompt_only,
+            chat,
             trace,
         } => pack(
             &store,
@@ -49,6 +50,7 @@ pub(crate) fn dispatch(cli: Cli) -> Result<()> {
             &model,
             &task,
             prompt_only,
+            chat,
             trace.as_deref(),
         ),
         Command::Trace(TraceSub::Show { store, call_id }) => trace_show(&store, CallId(call_id)),
@@ -144,12 +146,14 @@ fn page(store_path: &Path, session: SessionId, model_name: &str, task: &str) -> 
     Ok(())
 }
 
+#[allow(clippy::fn_params_excessive_bools)] // CLI flags map directly to handler args.
 fn pack(
     store_path: &Path,
     session: SessionId,
     model_name: &str,
     task: &str,
     prompt_only: bool,
+    chat: bool,
     trace_path: Option<&Path>,
 ) -> Result<()> {
     let (store, profile, tokenizer) = open_for_model(store_path, model_name)?;
@@ -188,7 +192,21 @@ fn pack(
         None
     };
 
-    if prompt_only {
+    if chat {
+        // Re-render the same plan as role-tagged messages.
+        let chat_prompt = packer.pack_chat(&request, &plan)?;
+        eprintln!("# model:         {}", chat_prompt.model);
+        eprintln!("# input_tokens:  {}", chat_prompt.input_tokens);
+        eprintln!("# messages:      {}", chat_prompt.messages.len());
+        eprintln!("# duration_ms:   {duration_ms}");
+        if let Some(id) = trace_id {
+            eprintln!("# trace_id:      {id}");
+        }
+        eprintln!("---");
+        let json = serde_json::to_string_pretty(&chat_prompt.messages)
+            .context("serializing chat messages")?;
+        println!("{json}");
+    } else if prompt_only {
         print!("{}", prompt.rendered);
     } else {
         eprintln!("# model:         {}", prompt.model);

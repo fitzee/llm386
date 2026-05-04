@@ -848,6 +848,7 @@ dependencies = [
  "llm386-store-lmdb",
  "llm386-tokenizer",
  "llm386-trace",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]

@@ -70,6 +70,10 @@ pub(crate) enum Command {
         /// Print only the rendered prompt (no header / manifest).
         #[arg(long)]
         prompt_only: bool,
+        /// Render as a JSON list of role-tagged chat messages instead
+        /// of a single string (suitable for chat-completion APIs).
+        #[arg(long, conflicts_with = "prompt_only")]
+        chat: bool,
         /// Optional trace store path. When set, the call is recorded
         /// and its CallId is printed on stderr.
         #[arg(long)]

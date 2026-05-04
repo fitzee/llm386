@@ -24,7 +24,7 @@ pub use block::{BlockKind, ContextBlock, Provenance, TokenCounts};
 pub use error::LlmError;
 pub use ids::{BlockId, CallId, ContentHash, SessionId, Timestamp, TokenCount};
 pub use model::{ModelProfile, ModelRegistry, default_profiles, default_registry};
-pub use packed::{PackedBlock, PackedPrompt, SectionKind};
+pub use packed::{ChatMessage, ChatPrompt, ChatRole, PackedBlock, PackedPrompt, SectionKind};
 pub use packer::{Packer, PackerError};
 pub use page::{OmissionReason, OmittedBlock, PagePlan, PageRequest};
 pub use pager::{Pager, PagerError};
