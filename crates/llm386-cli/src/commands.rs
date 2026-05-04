@@ -7,6 +7,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use llm386_compress::{NoopSummarizer, TruncatingSummarizer};
+use llm386_compress_anthropic::AnthropicSummarizer;
 use llm386_core::{
     BlockId, BlockKind, BlockStore, CallId, ContentHash, ContextBlock, ModelProfile, ModelRegistry,
     Packer, PageRequest, Pager, Provenance, SessionId, Summarizer, Timestamp, TokenCounts,
@@ -138,14 +139,18 @@ pub(crate) fn dispatch(command: Command, config: &LoadedConfig) -> Result<()> {
             max_chars,
             last,
             store_summary,
-        } => summarize(
-            &store,
-            SessionId(session),
+            anthropic_model,
+            anthropic_max_tokens,
+        } => summarize(&SummarizeArgs {
+            store_path: &store,
+            session: SessionId(session),
             summarizer,
             max_chars,
             last,
             store_summary,
-        ),
+            anthropic_model: anthropic_model.as_deref(),
+            anthropic_max_tokens,
+        }),
     }
 }
 
@@ -320,20 +325,24 @@ fn pack(
     Ok(())
 }
 
-fn summarize(
-    store_path: &Path,
+struct SummarizeArgs<'a> {
+    store_path: &'a Path,
     session: SessionId,
     summarizer: SummarizerArg,
     max_chars: usize,
     last: Option<usize>,
     store_summary: bool,
-) -> Result<()> {
-    let store = LmdbStore::open(store_path, StoreConfig::default())
-        .with_context(|| format!("opening store at {}", store_path.display()))?;
+    anthropic_model: Option<&'a str>,
+    anthropic_max_tokens: Option<u32>,
+}
 
-    let mut ids = store.list_session(session)?;
+fn summarize(args: &SummarizeArgs<'_>) -> Result<()> {
+    let store = LmdbStore::open(args.store_path, StoreConfig::default())
+        .with_context(|| format!("opening store at {}", args.store_path.display()))?;
+
+    let mut ids = store.list_session(args.session)?;
     ids.sort(); // BlockId order is chronological.
-    if let Some(n) = last {
+    if let Some(n) = args.last {
         let from = ids.len().saturating_sub(n);
         ids.drain(0..from);
     }
@@ -344,20 +353,31 @@ fn summarize(
         }
     }
 
-    let (summary_text, summarizer_name) = match summarizer {
+    let (summary_text, summarizer_name) = match args.summarizer {
         SummarizerArg::Noop => {
             let s = NoopSummarizer;
             (s.summarize(&blocks)?, s.name())
         }
         SummarizerArg::Truncating => {
-            let s = TruncatingSummarizer::new(max_chars);
+            let s = TruncatingSummarizer::new(args.max_chars);
+            (s.summarize(&blocks)?, s.name())
+        }
+        SummarizerArg::Anthropic => {
+            let mut s =
+                AnthropicSummarizer::from_env().context("constructing AnthropicSummarizer")?;
+            if let Some(model) = args.anthropic_model {
+                s = s.with_model(model);
+            }
+            if let Some(n) = args.anthropic_max_tokens {
+                s = s.with_max_tokens(n);
+            }
             (s.summarize(&blocks)?, s.name())
         }
     };
 
     print!("{summary_text}");
 
-    if store_summary {
+    if args.store_summary {
         let bytes = summary_text.into_bytes();
         let now = Timestamp(now_ms());
         let id = new_block_id();
@@ -376,7 +396,7 @@ fn summarize(
             },
             hash: ContentHash::of(&bytes),
         };
-        let stored = store.put(session, block)?;
+        let stored = store.put(args.session, block)?;
         eprintln!("# summary stored: {stored}");
     }
 

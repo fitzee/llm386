@@ -23,6 +23,7 @@ llm386-pager = { workspace = true }
 llm386-packer = { workspace = true }
 llm386-trace = { workspace = true }
 llm386-compress = { workspace = true }
+llm386-compress-anthropic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { version = "4", features = ["derive"] }

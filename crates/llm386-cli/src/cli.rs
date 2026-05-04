@@ -122,6 +122,12 @@ pub(crate) enum Command {
         /// Provenance.parents reference the originals.
         #[arg(long)]
         store_summary: bool,
+        /// For AnthropicSummarizer: model id (default `claude-haiku-4-5`).
+        #[arg(long)]
+        anthropic_model: Option<String>,
+        /// For AnthropicSummarizer: response token cap (default 1024).
+        #[arg(long)]
+        anthropic_max_tokens: Option<u32>,
     },
 }
 
@@ -142,6 +148,8 @@ pub(crate) enum TraceSub {
 pub(crate) enum SummarizerArg {
     Noop,
     Truncating,
+    /// Anthropic Claude (requires `ANTHROPIC_API_KEY`).
+    Anthropic,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
