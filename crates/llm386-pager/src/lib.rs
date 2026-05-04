@@ -9,6 +9,8 @@
 
 mod budget;
 mod greedy;
+mod retrievers;
 
 pub use budget::{SectionAllocation, SectionBudgetTable};
 pub use greedy::{GreedyPager, ScoringPolicy};
+pub use retrievers::{LexicalRetriever, PinnedRetriever, RecencyRetriever, SessionRetriever};

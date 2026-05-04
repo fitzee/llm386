@@ -8,27 +8,31 @@ use std::sync::Arc;
 
 use llm386_core::{
     BlockId, BlockStore, ContextBlock, OmissionReason, OmittedBlock, PagePlan, PageRequest, Pager,
-    PagerError, SectionKind, TokenCount, Tokenizer,
+    PagerError, Retriever, SectionKind, TokenCount, Tokenizer,
 };
 use tracing::instrument;
 
 use crate::budget::SectionBudgetTable;
+use crate::retrievers::RecencyRetriever;
 
-/// Weights for the linear score function.
+/// Cap on candidates each retriever may surface per call. Tunable
+/// later if it becomes a bottleneck for large sessions.
+const RETRIEVAL_LIMIT: usize = 4_096;
+
+/// Weights for the per-block score function.
 ///
-/// All weights should be non-negative. Defaults are tuned for "show
-/// the most recent stuff that fits, biased toward higher-priority
-/// blocks."
+/// Final score = `max_retriever_score + priority_weight * block.priority`.
+/// Recency-style ranking now lives in [`RecencyRetriever`]; tune it
+/// there (or swap in a different retriever) rather than via a weight
+/// here.
 #[derive(Clone, Copy, Debug)]
 pub struct ScoringPolicy {
-    pub recency_weight: f32,
     pub priority_weight: f32,
 }
 
 impl Default for ScoringPolicy {
     fn default() -> Self {
         Self {
-            recency_weight: 1.0,
             priority_weight: 0.5,
         }
     }
@@ -56,15 +60,20 @@ pub struct GreedyPager<S: BlockStore> {
     tokenizer: Arc<dyn Tokenizer>,
     scoring: ScoringPolicy,
     budgets: SectionBudgetTable,
+    retrievers: Vec<Arc<dyn Retriever>>,
 }
 
-impl<S: BlockStore> GreedyPager<S> {
+impl<S: BlockStore + 'static> GreedyPager<S> {
+    /// Construct with a default `RecencyRetriever` over the store —
+    /// matches the pre-retriever recency-weighted behavior.
     pub fn new(store: Arc<S>, tokenizer: Arc<dyn Tokenizer>) -> Self {
+        let recency: Arc<dyn Retriever> = Arc::new(RecencyRetriever::new(store.clone()));
         Self {
             store,
             tokenizer,
             scoring: ScoringPolicy::default(),
             budgets: SectionBudgetTable::default(),
+            retrievers: vec![recency],
         }
     }
 
@@ -79,14 +88,33 @@ impl<S: BlockStore> GreedyPager<S> {
         self.budgets = budgets;
         self
     }
+
+    /// Replace the retriever set entirely. Pass an empty vec to
+    /// disable retrieval (only required blocks will be returned).
+    #[must_use]
+    pub fn with_retrievers(mut self, retrievers: Vec<Arc<dyn Retriever>>) -> Self {
+        self.retrievers = retrievers;
+        self
+    }
+
+    /// Append a retriever to the existing set. Multiple retrievers
+    /// fan out in parallel and their candidates are merged by
+    /// `BlockId` (max score wins).
+    #[must_use]
+    pub fn add_retriever(mut self, retriever: Arc<dyn Retriever>) -> Self {
+        self.retrievers.push(retriever);
+        self
+    }
 }
 
 impl<S: BlockStore> fmt::Debug for GreedyPager<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let retriever_names: Vec<&str> = self.retrievers.iter().map(|r| r.name()).collect();
         f.debug_struct("GreedyPager")
             .field("tokenizer", &self.tokenizer.id())
             .field("scoring", &self.scoring)
             .field("budgets", &self.budgets)
+            .field("retrievers", &retriever_names)
             .finish_non_exhaustive()
     }
 }
@@ -142,33 +170,44 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
         };
         prompt_total = prompt_total.saturating_add(task_tokens);
 
-        // === Step 3: load + classify non-required candidates ===
-        let session_ids = self.store.list_session(request.session_id)?;
-        let mut min_ts = u64::MAX;
-        let mut max_ts = u64::MIN;
-        let mut blocks: Vec<ContextBlock> = Vec::with_capacity(session_ids.len());
-        for id in session_ids {
-            if required_set.contains(&id) {
-                continue;
-            }
-            if let Some(block) = self.store.get(id)? {
-                let ts = block.id.timestamp_ms();
-                min_ts = min_ts.min(ts);
-                max_ts = max_ts.max(ts);
-                blocks.push(block);
+        // === Step 3: gather candidates across retrievers ===
+        // Each retriever returns a (block_id, score) list. Merge by
+        // id keeping the max score so the best signal wins.
+        let mut retriever_score: HashMap<BlockId, f32> = HashMap::new();
+        for retriever in &self.retrievers {
+            let cands = retriever.retrieve(request.session_id, &request.task, RETRIEVAL_LIMIT)?;
+            for cand in cands {
+                if required_set.contains(&cand.block_id) {
+                    continue;
+                }
+                retriever_score
+                    .entry(cand.block_id)
+                    .and_modify(|s| {
+                        if cand.score > *s {
+                            *s = cand.score;
+                        }
+                    })
+                    .or_insert(cand.score);
             }
         }
+
+        // Load each surviving candidate and classify by section.
         let mut by_section: HashMap<SectionKind, Vec<Candidate>> = HashMap::new();
-        for block in blocks {
+        for (id, base_score) in retriever_score {
+            let block: ContextBlock = match self.store.get(id)? {
+                Some(b) => b,
+                None => continue, // retriever pointed at a missing block; ignore
+            };
             let tokens = self.tokens_for(&block)?;
-            let score = self.score_for(&block, min_ts, max_ts);
+            let priority = block.priority.clamp(0.0, 1.0);
+            let final_score = base_score + self.scoring.priority_weight * priority;
             by_section
                 .entry(block.kind.default_section())
                 .or_default()
                 .push(Candidate {
                     id: block.id,
                     tokens,
-                    score,
+                    score: final_score,
                 });
         }
         for cands in by_section.values_mut() {
@@ -260,14 +299,6 @@ impl<S: BlockStore> GreedyPager<S> {
             return Ok(n);
         }
         Ok(self.tokenizer.count(&block.bytes)?)
-    }
-
-    #[allow(clippy::cast_precision_loss)]
-    fn score_for(&self, block: &ContextBlock, min_ts: u64, max_ts: u64) -> f32 {
-        let span = max_ts.saturating_sub(min_ts).max(1) as f32;
-        let recency = (block.id.timestamp_ms().saturating_sub(min_ts) as f32) / span;
-        let priority = block.priority.clamp(0.0, 1.0);
-        self.scoring.recency_weight * recency + self.scoring.priority_weight * priority
     }
 }
 
@@ -513,6 +544,66 @@ mod tests {
             .unwrap();
         assert!(plan2.selected.is_empty());
         assert_eq!(plan2.omitted.len(), 6);
+    }
+
+    #[test]
+    fn lexical_retriever_steers_selection_toward_relevant_blocks() {
+        use crate::retrievers::LexicalRetriever;
+        use std::sync::Arc;
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        // Two facts. Only one mentions canberra.
+        let canberra = store
+            .put(
+                session,
+                block(
+                    b"canberra is the capital of australia",
+                    BlockKind::Fact,
+                    1,
+                    1,
+                ),
+            )
+            .unwrap();
+        let _moon = store
+            .put(
+                session,
+                block(b"the moon is far from earth", BlockKind::Fact, 2, 2),
+            )
+            .unwrap();
+        let lex: Arc<dyn llm386_core::Retriever> = Arc::new(LexicalRetriever::new(store.clone()));
+        // Empty retriever set + only lexical → only matching block surfaces.
+        let pager = GreedyPager::new(store, tok).with_retrievers(vec![lex]);
+        let plan = pager
+            .page(PageRequest {
+                session_id: session,
+                task: "where is australia".into(), // no overlap with the moon block
+                model: profile(1_000, 0),
+                required_blocks: vec![],
+            })
+            .unwrap();
+        assert_eq!(plan.selected, vec![canberra]);
+    }
+
+    #[test]
+    fn empty_retriever_set_returns_only_required() {
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        let id = store
+            .put(session, block(b"some fact", BlockKind::Fact, 1, 1))
+            .unwrap();
+        store
+            .put(session, block(b"unrelated", BlockKind::UserMessage, 2, 2))
+            .unwrap();
+        let pager = GreedyPager::new(store, tok).with_retrievers(vec![]);
+        let plan = pager
+            .page(PageRequest {
+                session_id: session,
+                task: String::new(),
+                model: profile(1_000, 0),
+                required_blocks: vec![id],
+            })
+            .unwrap();
+        assert_eq!(plan.selected, vec![id]);
     }
 
     #[test]

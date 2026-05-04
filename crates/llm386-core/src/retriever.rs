@@ -20,8 +20,10 @@ pub struct RetrievalCandidate {
 /// and their results merged + scored by the pager.
 pub trait Retriever: Send + Sync {
     /// Stable identifier for this retriever — used in
-    /// [`RetrievalCandidate::source`] and in traces.
-    fn name(&self) -> &str;
+    /// [`RetrievalCandidate::source`] and in traces. Must be a
+    /// `'static` string since retriever names are identifiers, not
+    /// values.
+    fn name(&self) -> &'static str;
 
     fn retrieve(
         &self,
