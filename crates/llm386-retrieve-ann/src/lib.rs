@@ -18,9 +18,11 @@
 #![doc(html_root_url = "https://docs.rs/llm386-retrieve-ann/0.1.0")]
 
 mod cache;
+mod hnsw;
 mod linear;
 mod openai;
 
 pub use cache::{EmbeddingCache, EmbeddingCacheError};
+pub use hnsw::HnswAnnRetriever;
 pub use linear::LinearAnnRetriever;
 pub use openai::OpenAiEmbedder;
