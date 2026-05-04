@@ -91,6 +91,16 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Trace(TraceSub),
 
+    /// Print the full contents of a single block by id.
+    Show {
+        /// Path to the LMDB store.
+        #[arg(long)]
+        store: PathBuf,
+        /// Block id (decimal, hex with `0x`, or bare 32-char hex).
+        #[arg(value_parser = parse_u128)]
+        id: u128,
+    },
+
     /// Summarize a session's blocks via the configured summarizer.
     Summarize {
         /// Path to the LMDB store.

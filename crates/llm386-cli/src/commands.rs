@@ -90,6 +90,7 @@ pub(crate) fn dispatch(command: Command, registry: &ModelRegistry) -> Result<()>
             registry,
         ),
         Command::Trace(TraceSub::Show { store, call_id }) => trace_show(&store, CallId(call_id)),
+        Command::Show { store, id } => show(&store, BlockId(id)),
         Command::Summarize {
             store,
             session,
@@ -339,6 +340,68 @@ fn summarize(
         eprintln!("# summary stored: {stored}");
     }
 
+    Ok(())
+}
+
+fn show(store_path: &Path, id: BlockId) -> Result<()> {
+    let store = LmdbStore::open(store_path, StoreConfig::default())
+        .with_context(|| format!("opening store at {}", store_path.display()))?;
+    let block = store
+        .get(id)?
+        .ok_or_else(|| anyhow!("block not found: {id}"))?;
+
+    println!("id:            {}", block.id);
+    println!("kind:          {:?}", block.kind);
+    println!("priority:      {:.4}", block.priority);
+    println!("created_at:    {}", block.created_at.0);
+    println!("updated_at:    {}", block.updated_at.0);
+    println!("hash:          {:?}", block.hash);
+    println!("body_bytes:    {}", block.bytes.len());
+
+    if block.provenance.source.is_some()
+        || !block.provenance.parents.is_empty()
+        || !block.provenance.labels.is_empty()
+    {
+        println!("provenance:");
+        if let Some(src) = &block.provenance.source {
+            println!("  source:      {src}");
+        }
+        if !block.provenance.parents.is_empty() {
+            println!("  parents ({}):", block.provenance.parents.len());
+            for p in &block.provenance.parents {
+                println!("    {p}");
+            }
+        }
+        if !block.provenance.labels.is_empty() {
+            println!("  labels:      {}", block.provenance.labels.join(", "));
+        }
+    }
+
+    if !block.token_counts.is_empty() {
+        println!("token_counts:");
+        for (tid, count) in block.token_counts.iter() {
+            println!("  {tid}: {count}");
+        }
+    }
+
+    println!("---");
+    if let Ok(text) = std::str::from_utf8(&block.bytes) {
+        print!("{text}");
+        if !text.ends_with('\n') {
+            println!();
+        }
+    } else {
+        // Binary body — hex dump first 256 bytes.
+        for chunk in block.bytes.chunks(16).take(16) {
+            for b in chunk {
+                print!("{b:02x} ");
+            }
+            println!();
+        }
+        if block.bytes.len() > 256 {
+            println!("... ({} more bytes)", block.bytes.len() - 256);
+        }
+    }
     Ok(())
 }
 
