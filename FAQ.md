@@ -89,7 +89,12 @@ Application-level corruption (your own code or a future schema migration writing
 - Each block carries its content hash, so corrupt block bodies are detectable.
 - `blocks_by_hash` and `blocks_by_session` are indexes derived from `blocks_by_id`, so they can in principle be rebuilt from the primary table.
 
-There is no `llm386 fsck` or auto-repair subcommand today. The honest answer: keep backups. Copying the store directory while no writer is active is a valid backup. An explicit `repair` and `verify` pair is on the roadmap.
+For corruption you can detect and fix yourself, the runtime ships two subcommands:
+
+- `llm386 verify --store ./store` walks every block in the primary table, recomputes its content hash, and checks the hash and session indexes for consistency. Read-only. Returns a non-zero exit code on any inconsistency.
+- `llm386 repair --store ./store --yes` rebuilds derivable state (the hash index) from the primary table and removes orphan session entries that point at missing blocks. Blocks whose stored hash doesn't match their bytes are left in place and reported — those need human review, not silent rewrite.
+
+Beyond what those tools cover, the honest answer is: keep backups. Copying the store directory while no writer is active is a valid backup.
 
 ### Is it ever a good idea to purge memory?
 
@@ -130,12 +135,19 @@ for session, bid, kind, ts in hits:
 
 For larger stores, the same shape works directly against the Rust library and skips the per-call FFI.
 
-**Removing the blocks.** Two paths today, both manual:
+**Removing the blocks.** Use the `purge` subcommand (or its Python equivalent). Both are destructive and require explicit confirmation:
 
-- **Whole-session purge** (simplest, when you can sacrifice the session): open a fresh store, copy across every session you want to keep, swap the directories. Atomic at the directory level.
-- **Targeted block purge** (more work): same approach, but inside each surviving session, copy block-by-block excluding the offending ids. Preserve `Provenance.parents` references where possible; orphaned references are tolerated by the pager but cosmetic.
+```
+llm386 purge --store ./store --block <block-id> --yes
+llm386 purge --store ./store --session <session-id> --yes
+```
 
-A native `llm386 purge --session ... --block ...` subcommand and a matching Python `Store.delete(block_id)` are on the roadmap. Until then, the targeted-purge script is the right answer for compliance work, and you can run it safely while no other writer is active.
+```python
+store.delete(block_id)             # returns True if anything was removed
+store.purge_session(session_id)    # returns count of blocks affected
+```
+
+`delete` removes the block from the primary table, the content-hash index, and every session that referenced it. `purge_session` removes the entire session's references; blocks left orphaned by that (no other session points at them) are then dropped from the primary table and the hash index too. Both operations run in a single LMDB write transaction.
 
 For audit trail, capture `(session, block_id, kind, hash, created_at)` for every hit before you delete, and store that in a separate compliance log. The content hash makes it easy to prove later that a specific block did exist and was removed.
 
@@ -392,7 +404,26 @@ Two practical notes:
 - **Upsert is your problem, not the runtime's.** Pinecone needs the vectors before `query` returns anything useful. Run a one-time job that walks `list_session(...)`, embeds each block, and upserts to Pinecone with the hex `BlockId` as the vector id. Re-run on new ingest.
 - **Score scale.** Pinecone returns cosine similarity in `[-1, 1]` for cosine indexes and dot product for others. Clamp to `[0, 1]` (as above) so the merged scores compose with retrievers that already return that range.
 
-A Python-side trait implementation (writing a `Retriever` in Python that gets called from Rust) is on the roadmap for the v0.3 PyO3 bindings. Until then, custom retrievers live in Rust and the Python SDK exposes the Rust ones.
+If you'd rather write the retriever in Python, the PyO3 bindings support that too. Define a class with a `name` attribute and a `retrieve(session, task, limit)` method that returns a list of `(block_id_hex, score)` tuples, then register it on the Store:
+
+```python
+class PineconeRetriever:
+    name = "pinecone"
+
+    def __init__(self, client, index, embedder):
+        self.client = client
+        self.index = index
+        self.embedder = embedder
+
+    def retrieve(self, session, task, limit):
+        vec = self.embedder.embed(task)
+        matches = self.index.query(vector=vec, top_k=limit, include_metadata=False)
+        return [(m["id"], m["score"]) for m in matches["matches"]]
+
+store.add_python_retriever(PineconeRetriever(client, index, embedder))
+```
+
+The Rust pager calls back into your Python code on every `page()` / `pack()`. Same composition rules as the Rust retrievers above — the pager merges by `BlockId` (max score wins). Use whichever side fits your stack better; for production-scale latency the Rust path will always win, but the Python path is fine for correctness and easy iteration.
 
 ---
 
