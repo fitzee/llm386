@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{BlockId, ContentHash, Timestamp, TokenCount};
+use crate::packed::SectionKind;
 use crate::tokenizer::TokenizerId;
 
 /// The atomic unit of memory.
@@ -40,6 +41,25 @@ pub enum BlockKind {
     Plan,
     State,
     Trace,
+}
+
+impl BlockKind {
+    /// Map this block kind to the [`SectionKind`] the pager and
+    /// packer use by default. Both crates share this mapping so
+    /// budget allocation and rendering agree on which section a
+    /// block belongs to.
+    #[must_use]
+    pub const fn default_section(self) -> SectionKind {
+        match self {
+            Self::System => SectionKind::System,
+            Self::State => SectionKind::State,
+            Self::Plan => SectionKind::Plan,
+            Self::Summary | Self::Fact => SectionKind::Retrieved,
+            Self::ToolResult => SectionKind::Tools,
+            Self::UserMessage | Self::AssistantMessage => SectionKind::Recent,
+            Self::DocumentChunk | Self::Trace => SectionKind::Background,
+        }
+    }
 }
 
 /// Where a block came from and how it relates to others.

@@ -14,8 +14,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+#[cfg(test)]
+use llm386_core::BlockKind;
 use llm386_core::{
-    BlockKind, BlockStore, ContextBlock, PackedBlock, PackedPrompt, Packer, PackerError, PagePlan,
+    BlockStore, ContextBlock, PackedBlock, PackedPrompt, Packer, PackerError, PagePlan,
     PageRequest, SectionKind, StoreError, Tokenizer,
 };
 use tracing::instrument;
@@ -67,7 +69,7 @@ impl<S: BlockStore + 'static> Packer for SimplePacker<S> {
                 )))
             })?;
             by_section
-                .entry(section_for(block.kind))
+                .entry(block.kind.default_section())
                 .or_default()
                 .push(block);
         }
@@ -140,18 +142,6 @@ fn write_header(buf: &mut String, section: SectionKind) {
     buf.push_str("## ");
     buf.push_str(section_label(section));
     buf.push_str("\n\n");
-}
-
-const fn section_for(kind: BlockKind) -> SectionKind {
-    match kind {
-        BlockKind::System => SectionKind::System,
-        BlockKind::State => SectionKind::State,
-        BlockKind::Plan => SectionKind::Plan,
-        BlockKind::Summary | BlockKind::Fact => SectionKind::Retrieved,
-        BlockKind::ToolResult => SectionKind::Tools,
-        BlockKind::UserMessage | BlockKind::AssistantMessage => SectionKind::Recent,
-        BlockKind::DocumentChunk | BlockKind::Trace => SectionKind::Background,
-    }
 }
 
 const fn section_label(s: SectionKind) -> &'static str {

@@ -16,8 +16,10 @@ pub struct PackedBlock {
 
 /// Section / slot a block occupies in the rendered prompt.
 ///
-/// Variant order matches the canonical packer section order.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+/// Variant order matches the canonical packer section order — this
+/// is also the natural `Ord` for the type so map iterations land in
+/// canonical order without a separate `SECTION_ORDER` table.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
 pub enum SectionKind {
     /// System / hard constraints.
     System,

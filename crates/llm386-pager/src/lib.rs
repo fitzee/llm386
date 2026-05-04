@@ -7,6 +7,8 @@
 
 #![doc(html_root_url = "https://docs.rs/llm386-pager/0.1.0")]
 
+mod budget;
 mod greedy;
 
+pub use budget::{SectionAllocation, SectionBudgetTable};
 pub use greedy::{GreedyPager, ScoringPolicy};
