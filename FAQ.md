@@ -1,5 +1,7 @@
 # Frequently asked questions
 
+- [Naming and motivation](#naming-and-motivation)
+  - [The README mentions EMM386. What was it, and how is LLM386 similar?](#the-readme-mentions-emm386-what-was-it-and-how-is-llm386-similar)
 - [Performance and sizing](#performance-and-sizing)
   - [How much latency does this add to my agent?](#how-much-latency-does-this-add-to-my-agent)
   - [How big can the memory store get?](#how-big-can-the-memory-store-get)
@@ -10,11 +12,37 @@
   - [How do I migrate "memories" from an existing memory subsystem?](#how-do-i-migrate-memories-from-an-existing-memory-subsystem)
 - [Sessions and multi-tenancy](#sessions-and-multi-tenancy)
   - [Does it support multiple user sessions?](#does-it-support-multiple-user-sessions)
+  - [A user has many sessions. How does memory span them?](#a-user-has-many-sessions-how-does-memory-span-them)
+  - [Can I assert facts that are available to every session?](#can-i-assert-facts-that-are-available-to-every-session)
+  - [Can multiple agents share the same memory store?](#can-multiple-agents-share-the-same-memory-store)
 - [Retrieval and RAG](#retrieval-and-rag)
   - [How does it work with RAG, and does it store links to blobs/documents?](#how-does-it-work-with-rag-and-does-it-store-links-to-blobsdocuments)
   - [How do I write a custom retriever for Pinecone, and wire it in?](#how-do-i-write-a-custom-retriever-for-pinecone-and-wire-it-in)
 - [Comparison and adoption](#comparison-and-adoption)
   - [Why should I use this over other approaches?](#why-should-i-use-this-over-other-approaches)
+
+---
+
+## Naming and motivation
+
+### The README mentions EMM386. What was it, and how is LLM386 similar?
+
+EMM386 ("Expanded Memory Manager for the 386") was a DOS-era memory manager from the late 1980s and early 1990s. The constraint at the time: DOS programs could only directly address the first 640 KB of memory ("conventional memory"), even on machines with several megabytes installed. EMM386 used the 80386 CPU's address-translation hardware to page chunks of that larger memory through a small fixed window inside the 640 KB region. Programs that knew how to ask got effectively unlimited memory — through a peephole.
+
+LLM386 does the same trick for LLM context windows.
+
+| EMM386                                 | LLM386                                              |
+|----------------------------------------|-----------------------------------------------------|
+| Conventional memory: bounded (640 KB)  | Context window: bounded (32 K, 128 K, 1 M tokens)   |
+| External memory: gigabytes available   | External memory: persistent block store             |
+| Page frame: a small 64 KB window       | The model's prompt: a few thousand tokens at a time |
+| EMS pages chunks in/out on demand      | Pager selects blocks for each call                  |
+| Caller sees a single flat view         | Model sees a single flat prompt                     |
+| Hardware does the address translation  | The pager + packer do the assembly                  |
+
+In both cases the underlying constraint never moves — DOS still only sees 640 KB, the model still only gets its context window. The trick is making a much larger external memory available *through* that window, by paging only what's relevant for the current operation.
+
+The 386 in the name is also a tip of the hat to the era. There is no special significance to the number beyond the homage.
 
 ---
 
@@ -150,7 +178,83 @@ Yes. Every block belongs to a `SessionId` (a 128-bit value), and every read/writ
 
 For stronger isolation between tenants (compliance, key separation, regulatory boundaries), open a separate `LmdbStore` per tenant. Each one is its own LMDB env with its own files.
 
-Cross-session retrieval (for example, "find similar facts across all my agents") isn't built in, but it's a small custom `Retriever` away.
+### A user has many sessions. How does memory span them?
+
+The runtime treats every block as belonging to exactly one `SessionId`, so cross-session memory is something you opt into rather than something that happens by default. Three patterns work:
+
+**One session per user, many turns.** Use a single `SessionId` for everything that user does and let the pager surface relevant turns from across the whole history. Simplest model. Works well when "user" and "agent" are the same conceptual thing.
+
+**Many sessions per user, plus a "user-shared" session.** Pick a stable session id derived from the user (`SessionId(user_id_hash)` for example). Write the user's persistent facts to that session. Each conversation gets its own session id. Add a custom retriever that *also* reads from the user-shared session:
+
+```python
+class CrossSessionRetriever:
+    name = "cross-session"
+
+    def __init__(self, store, shared_session: int, score: float = 0.5):
+        self.store = store
+        self.shared_session = shared_session
+        self.score = score
+
+    def retrieve(self, session, task, limit):
+        # Use page() with a giant budget to enumerate the shared
+        # session's blocks. (Until a list_blocks method lands.)
+        plan = self.store.page(self.shared_session, "gpt-4.1", task)
+        return [(bid, self.score) for bid in plan.selected[:limit]]
+
+store.add_python_retriever(CrossSessionRetriever(store, shared_session=0))
+```
+
+The pager fans out across all configured retrievers, so this composes with the built-ins.
+
+**Many sessions per user, with the same store.** Simplest variant: every session is isolated by default, and you write the same fact into each session as the agent learns it. No retriever code, but you pay the storage cost (the content-hash dedup keeps it from being awful — same facts share one block id and one body, only the per-session pointer is duplicated).
+
+Pick based on whether facts genuinely are user-scoped (option 1 or 2) or genuinely are conversation-scoped (option 3).
+
+### Can I assert facts that are available to every session?
+
+Yes, with the same patterns. The most common shape is a "global facts" session — pick a sentinel `SessionId` (for example, `SessionId(0)` or a hash of `"global"`) and write facts there:
+
+```python
+GLOBAL = 0
+store.put(session=GLOBAL, kind="fact", body="The user's name is Mira.")
+store.put(session=GLOBAL, kind="fact", body="Always answer in metric units.")
+```
+
+Then add a retriever that always reads from that session, regardless of which session the current call is targeting:
+
+```python
+class GlobalFactsRetriever:
+    name = "global-facts"
+
+    def __init__(self, store, global_session=0):
+        self.store = store
+        self.global_session = global_session
+
+    def retrieve(self, session, task, limit):
+        plan = self.store.page(self.global_session, "gpt-4.1", task)
+        return [(bid, 0.7) for bid in plan.selected[:limit]]
+
+store.add_python_retriever(GlobalFactsRetriever(store))
+```
+
+The score is a knob: lower it if the global facts should only surface when nothing else is relevant, raise it to bias every prompt toward including them. The pager merges by max score per `BlockId`, so a global fact that's also retrieved by `RecencyRetriever` in the current session keeps the higher of the two scores.
+
+This pattern works at any scope: a global "company-wide instructions" session, a per-user "user profile" session, a per-team "team conventions" session. They're all just specially-named session ids.
+
+### Can multiple agents share the same memory store?
+
+Yes, with two flavors.
+
+**In-process.** Multiple agents in the same Python or Rust process can share a single store cheaply. Open it once, clone the `Arc<LmdbStore>` (or pass the same Python `Store` instance) to every agent. LMDB's MVCC means readers never block each other; writes within one process serialize through an internal mutex. This is the default working assumption.
+
+**Cross-process.** LMDB is designed for multi-process access too. Each process opens its own `LmdbStore` at the same path; committed writes from one are immediately visible to readers in the others. File-level locking serializes writes across processes. The major caveat: this only works on local filesystems with proper mmap semantics. NFS, some networked filesystems, and certain container overlay filesystems don't behave correctly under LMDB's mmap model. POSIX local filesystems (ext4, xfs, APFS) are fine.
+
+**Two flavors of "sharing"** are worth distinguishing:
+
+- *Sharing the store, with separate sessions.* Each agent owns one or more `SessionId`s. They never see each other's blocks unless a custom retriever reads across sessions. This is the right pattern for a multi-agent system where each agent has its own memory scope.
+- *Sharing the store, with overlapping sessions.* Multiple agents read and write the same `SessionId`. They see every other agent's blocks. This is the right pattern for a "team of agents working on one problem" topology, with the session as the shared workspace.
+
+For strong isolation between tenants (different customers, regulatory boundaries), use a separate store per tenant rather than a separate session. Each store is its own LMDB env, its own files, its own permission boundary.
 
 ---
 
