@@ -10,7 +10,11 @@ use crate::ids::TokenCount;
 
 /// String-keyed identifier for a tokenizer family
 /// (e.g. `"cl100k_base"`, `"o200k_base"`, `"llama-3"`).
+///
+/// `#[serde(transparent)]` so it round-trips as a plain string in
+/// JSON / TOML / etc. — `tokenizer = "cl100k_base"` is the wire form.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct TokenizerId(String);
 
 impl TokenizerId {

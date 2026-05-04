@@ -9,15 +9,28 @@ use crate::ids::TokenCount;
 use crate::tokenizer::TokenizerId;
 
 /// Constraints and capabilities of a target model.
+///
+/// `safety_margin_tokens`, `supports_system_role`, and
+/// `supports_tools` carry serde defaults so user-supplied TOML /
+/// JSON profile files only need to set the load-bearing fields
+/// (`name`, `max_context_tokens`, `reserved_output_tokens`,
+/// `tokenizer`).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ModelProfile {
     pub name: String,
     pub max_context_tokens: u32,
     pub reserved_output_tokens: u32,
+    #[serde(default)]
     pub safety_margin_tokens: u32,
     pub tokenizer: TokenizerId,
+    #[serde(default = "default_true")]
     pub supports_system_role: bool,
+    #[serde(default = "default_true")]
     pub supports_tools: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 impl ModelProfile {

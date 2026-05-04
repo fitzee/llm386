@@ -11,6 +11,13 @@ use clap::{Parser, Subcommand, ValueEnum};
     about = "LLM386 — context virtualization runtime"
 )]
 pub(crate) struct Cli {
+    /// Optional path to a TOML file with extra `[[profile]]` entries
+    /// merged into the built-in model registry. May also be set via
+    /// the `LLM386_PROFILES` environment variable; the flag wins
+    /// when both are present.
+    #[arg(long, global = true)]
+    pub(crate) profiles: Option<PathBuf>,
+
     #[command(subcommand)]
     pub(crate) command: Command,
 }

@@ -8,20 +8,54 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use llm386_compress::{NoopSummarizer, TruncatingSummarizer};
 use llm386_core::{
-    BlockId, BlockKind, BlockStore, CallId, ContentHash, ContextBlock, ModelProfile, Packer,
-    PageRequest, Pager, Provenance, SessionId, Summarizer, Timestamp, TokenCounts, Tokenizer,
-    TraceRecord, TraceSink, default_registry,
+    BlockId, BlockKind, BlockStore, CallId, ContentHash, ContextBlock, ModelProfile, ModelRegistry,
+    Packer, PageRequest, Pager, Provenance, SessionId, Summarizer, Timestamp, TokenCounts,
+    Tokenizer, TraceRecord, TraceSink, default_registry,
 };
 use llm386_packer::SimplePacker;
 use llm386_pager::GreedyPager;
 use llm386_store_lmdb::{LmdbStore, StoreConfig};
 use llm386_tokenizer::default_registry as tokenizer_registry;
 use llm386_trace::LmdbTraceSink;
+use serde::Deserialize;
 
-use crate::cli::{Cli, Command, SummarizerArg, TraceSub};
+use crate::cli::{Command, SummarizerArg, TraceSub};
 
-pub(crate) fn dispatch(cli: Cli) -> Result<()> {
-    match cli.command {
+const PROFILES_ENV: &str = "LLM386_PROFILES";
+
+/// Load the built-in registry, then merge in any user profiles from
+/// `--profiles <path>` (or, if absent, the `LLM386_PROFILES` env var).
+/// User entries override built-ins with the same name.
+pub(crate) fn load_models(flag_path: Option<&Path>) -> Result<ModelRegistry> {
+    let mut reg = default_registry();
+    let path = flag_path
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os(PROFILES_ENV).map(std::path::PathBuf::from));
+    if let Some(path) = path {
+        let toml_str = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading profiles file at {}", path.display()))?;
+        for profile in parse_profiles_toml(&toml_str)
+            .with_context(|| format!("parsing profiles file at {}", path.display()))?
+        {
+            reg.register(profile);
+        }
+    }
+    Ok(reg)
+}
+
+#[derive(Deserialize)]
+struct ProfilesFile {
+    #[serde(default)]
+    profile: Vec<ModelProfile>,
+}
+
+fn parse_profiles_toml(s: &str) -> Result<Vec<ModelProfile>> {
+    let parsed: ProfilesFile = toml::from_str(s)?;
+    Ok(parsed.profile)
+}
+
+pub(crate) fn dispatch(command: Command, registry: &ModelRegistry) -> Result<()> {
+    match command {
         Command::Init { path } => init(&path),
         Command::Put {
             store,
@@ -30,13 +64,13 @@ pub(crate) fn dispatch(cli: Cli) -> Result<()> {
             priority,
             file,
         } => put(&store, SessionId(session), kind.into(), priority, &file),
-        Command::ListModels => list_models(),
+        Command::ListModels => list_models(registry),
         Command::Page {
             store,
             session,
             model,
             task,
-        } => page(&store, SessionId(session), &model, &task),
+        } => page(&store, SessionId(session), &model, &task, registry),
         Command::Pack {
             store,
             session,
@@ -53,6 +87,7 @@ pub(crate) fn dispatch(cli: Cli) -> Result<()> {
             prompt_only,
             chat,
             trace.as_deref(),
+            registry,
         ),
         Command::Trace(TraceSub::Show { store, call_id }) => trace_show(&store, CallId(call_id)),
         Command::Summarize {
@@ -119,8 +154,7 @@ fn put(
 }
 
 #[allow(clippy::unnecessary_wraps)] // matches sibling-handler signatures.
-fn list_models() -> Result<()> {
-    let reg = default_registry();
+fn list_models(reg: &ModelRegistry) -> Result<()> {
     let mut profiles: Vec<&ModelProfile> = reg.profiles().collect();
     profiles.sort_by(|a, b| a.name.cmp(&b.name));
     println!(
@@ -140,8 +174,14 @@ fn list_models() -> Result<()> {
     Ok(())
 }
 
-fn page(store_path: &Path, session: SessionId, model_name: &str, task: &str) -> Result<()> {
-    let (store, profile, tokenizer) = open_for_model(store_path, model_name)?;
+fn page(
+    store_path: &Path,
+    session: SessionId,
+    model_name: &str,
+    task: &str,
+    registry: &ModelRegistry,
+) -> Result<()> {
+    let (store, profile, tokenizer) = open_for_model(store_path, model_name, registry)?;
     let pager = GreedyPager::new(store, tokenizer);
     let plan = pager.page(PageRequest {
         session_id: session,
@@ -162,7 +202,7 @@ fn page(store_path: &Path, session: SessionId, model_name: &str, task: &str) -> 
     Ok(())
 }
 
-#[allow(clippy::fn_params_excessive_bools)] // CLI flags map directly to handler args.
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)] // CLI flags map 1:1 to handler args; refactoring to a struct buys nothing here.
 fn pack(
     store_path: &Path,
     session: SessionId,
@@ -171,8 +211,9 @@ fn pack(
     prompt_only: bool,
     chat: bool,
     trace_path: Option<&Path>,
+    registry: &ModelRegistry,
 ) -> Result<()> {
-    let (store, profile, tokenizer) = open_for_model(store_path, model_name)?;
+    let (store, profile, tokenizer) = open_for_model(store_path, model_name, registry)?;
     let pager = GreedyPager::new(store.clone(), tokenizer.clone());
     let packer = SimplePacker::new(store, tokenizer);
 
@@ -330,12 +371,13 @@ fn trace_show(store_path: &Path, call_id: CallId) -> Result<()> {
 fn open_for_model(
     store_path: &Path,
     model_name: &str,
+    registry: &ModelRegistry,
 ) -> Result<(Arc<LmdbStore>, ModelProfile, Arc<dyn Tokenizer>)> {
     let store = Arc::new(
         LmdbStore::open(store_path, StoreConfig::default())
             .with_context(|| format!("opening store at {}", store_path.display()))?,
     );
-    let profile = default_registry()
+    let profile = registry
         .get(model_name)
         .ok_or_else(|| anyhow!("unknown model profile: {model_name}"))?
         .clone();
@@ -366,4 +408,67 @@ fn new_call_id() -> CallId {
     let mut buf = [0u8; 16];
     getrandom::fill(&mut buf).expect("getrandom should not fail");
     CallId(u128::from_be_bytes(buf))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_profiles_toml_basic() {
+        let s = r#"
+[[profile]]
+name = "my-model"
+max_context_tokens = 64000
+reserved_output_tokens = 8000
+tokenizer = "o200k_base"
+"#;
+        let profiles = parse_profiles_toml(s).unwrap();
+        assert_eq!(profiles.len(), 1);
+        let p = &profiles[0];
+        assert_eq!(p.name, "my-model");
+        assert_eq!(p.max_context_tokens, 64_000);
+        assert_eq!(p.reserved_output_tokens, 8_000);
+        // Defaults applied.
+        assert_eq!(p.safety_margin_tokens, 0);
+        assert!(p.supports_system_role);
+        assert!(p.supports_tools);
+        assert_eq!(p.tokenizer.as_str(), "o200k_base");
+    }
+
+    #[test]
+    fn parse_profiles_toml_explicit_fields() {
+        let s = r#"
+[[profile]]
+name = "strict"
+max_context_tokens = 1000
+reserved_output_tokens = 100
+safety_margin_tokens = 50
+tokenizer = "cl100k_base"
+supports_system_role = false
+supports_tools = false
+"#;
+        let p = parse_profiles_toml(s).unwrap().into_iter().next().unwrap();
+        assert_eq!(p.safety_margin_tokens, 50);
+        assert!(!p.supports_system_role);
+        assert!(!p.supports_tools);
+    }
+
+    #[test]
+    fn parse_profiles_toml_empty_file_yields_empty_vec() {
+        let p = parse_profiles_toml("").unwrap();
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn parse_profiles_toml_rejects_missing_required_field() {
+        // No `tokenizer` field — should fail.
+        let s = r#"
+[[profile]]
+name = "broken"
+max_context_tokens = 100
+reserved_output_tokens = 10
+"#;
+        assert!(parse_profiles_toml(s).is_err());
+    }
 }
