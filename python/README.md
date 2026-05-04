@@ -90,7 +90,14 @@ if result.trace_id:
           f"{len(record.plan.selected)} blocks selected")
 ```
 
-`TraceRecord` exposes the full record: `call_id`, `session`, `model`, `plan` (a `PagePlan`), `prompt_tokens`, `prompt_hash`, `started_at` (ms since epoch), and `duration_ms`.
+`TraceRecord` exposes the full record: `call_id`, `session`, `model`, `plan` (a `PagePlan`), `prompt_tokens`, `prompt_hash`, `started_at` (ms since epoch), `duration_ms`, plus `model_version`, `tokenizer_version`, `output` (`Optional[str]`), and `output_tokens` (`Optional[int]`). The output fields are `None` until you patch them in after the model returns:
+
+```python
+trace_store = Trace("./traces")
+trace_store.update_output(call_id, reply, usage.completion_tokens)
+```
+
+Doing this gives you a replay-complete trace: the exact prompt, the exact model build, and the exact response.
 
 ## Custom profiles, tokenizers, retrievers
 
@@ -134,6 +141,23 @@ print(store.summarize(session=1, summarizer="truncating", max_chars=80))
 print(store.summarize(session=1, summarizer="anthropic", store_summary=True))
 ```
 
+## Typed edges
+
+Beyond `Provenance.parents` (lineage), you can persist typed directed edges between blocks. Edge-aware paging follows them when assembling a working set so dependencies travel together.
+
+```python
+store.add_edge(claim_id, evidence_id, "supports")
+store.add_edge(assistant_msg_id, tool_result_id, "tool-invocation")
+
+# Inspect:
+for to_id, kind in store.edges_from(claim_id):
+    print(kind, to_id)
+for from_id, kind in store.edges_to(evidence_id):
+    print(from_id, kind)
+```
+
+Kinds: `"parent"`, `"derived-from"`, `"supports"`, `"contradicts"`, `"tool-invocation"`. Re-adding the same triple is a no-op. Deleting or purging a block removes every edge that touches it.
+
 ## Custom Python retrievers
 
 Write a class with a `name` attribute and a `retrieve(session, task, limit)` method that returns a list of `(block_id_hex, score)` tuples. Register it on the Store, and the Rust pager calls back into your code as part of every `page()` / `pack()`.
@@ -171,7 +195,7 @@ from llm386 import (
 
     # Result types
     ChatMessage, ContextBlock, ModelProfile,
-    OmittedBlock, PackResult, PagePlan, Provenance,
+    OmittedBlock, PackResult, PagePlan, Provenance, Selection,
 
     LLM386Error,     # raised when the CLI invocation fails
 )

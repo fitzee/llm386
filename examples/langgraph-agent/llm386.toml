@@ -1,0 +1,13 @@
+# LLM386 retriever stack for the demo.
+#
+# BM25 surfaces blocks that share keywords with the current task — useful
+# when the user asks about something said many turns ago. RecencyRetriever
+# keeps the last few turns weighted high. The pager fans out across both
+# and merges by max-score-per-BlockId.
+
+[[retriever]]
+kind = "bm25"
+
+[[retriever]]
+kind = "recency"
+half_life_secs = 600.0

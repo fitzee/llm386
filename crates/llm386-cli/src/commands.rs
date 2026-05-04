@@ -227,6 +227,9 @@ pub(crate) fn dispatch(command: Command, config: &LoadedConfig) -> Result<()> {
             config,
         ),
         Command::Trace(TraceSub::Show { store, call_id }) => trace_show(&store, CallId(call_id)),
+        Command::Trace(TraceSub::Diff { store, prev, next }) => {
+            trace_diff(&store, CallId(prev), CallId(next))
+        }
         Command::ListSessions { store } => list_sessions(&store),
         Command::Verify { store } => verify(&store),
         Command::Repair { store, yes } => repair(&store, yes),
@@ -237,6 +240,17 @@ pub(crate) fn dispatch(command: Command, config: &LoadedConfig) -> Result<()> {
             yes,
         } => purge(&store, block, session, yes),
         Command::Show { store, id, json } => show(&store, BlockId(id), json),
+        Command::AddEdge {
+            store,
+            from,
+            to,
+            kind,
+        } => add_edge(&store, BlockId(from), BlockId(to), kind.into()),
+        Command::Edges {
+            store,
+            id,
+            incoming,
+        } => edges(&store, BlockId(id), incoming),
         Command::Summarize {
             store,
             session,
@@ -409,6 +423,10 @@ fn pack(
             prompt_hash: ContentHash::of(prompt.rendered.as_bytes()),
             started_at,
             duration_ms,
+            model_version: request.model.name.clone(),
+            tokenizer_version: request.model.tokenizer.as_str().to_string(),
+            output: None,
+            output_tokens: None,
         })?;
         Some(call_id)
     } else {
@@ -706,6 +724,83 @@ fn show(store_path: &Path, id: BlockId, json: bool) -> Result<()> {
         if block.bytes.len() > 256 {
             println!("... ({} more bytes)", block.bytes.len() - 256);
         }
+    }
+    Ok(())
+}
+
+fn trace_diff(store_path: &Path, prev: CallId, next: CallId) -> Result<()> {
+    let sink = LmdbTraceSink::open(store_path)
+        .with_context(|| format!("opening trace store at {}", store_path.display()))?;
+    let prev_rec = sink.fetch(prev)?.ok_or_else(|| anyhow!("no trace for {prev}"))?;
+    let next_rec = sink.fetch(next)?.ok_or_else(|| anyhow!("no trace for {next}"))?;
+
+    let diff = llm386_diff::diff_traces(&prev_rec, &next_rec);
+    println!("prev:    {prev}");
+    println!("next:    {next}");
+    println!("summary: {}", diff.summary());
+
+    if !diff.added.is_empty() {
+        println!("added ({}):", diff.added.len());
+        for entry in &diff.added {
+            println!(
+                "  + {} ({:?})",
+                entry.block_id,
+                entry.reason_next.expect("added entries have a next reason"),
+            );
+        }
+    }
+    if !diff.removed.is_empty() {
+        println!("removed ({}):", diff.removed.len());
+        for entry in &diff.removed {
+            println!(
+                "  - {} ({:?})",
+                entry.block_id,
+                entry.reason_prev.expect("removed entries have a prev reason"),
+            );
+        }
+    }
+    let changed: Vec<_> = diff.kept.iter().filter(|e| e.reason_changed()).collect();
+    if !changed.is_empty() {
+        println!("reason changes ({}):", changed.len());
+        for entry in changed {
+            println!(
+                "  ~ {} ({:?} -> {:?})",
+                entry.block_id,
+                entry.reason_prev.expect("kept entries have a prev reason"),
+                entry.reason_next.expect("kept entries have a next reason"),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn add_edge(
+    store_path: &Path,
+    from: BlockId,
+    to: BlockId,
+    kind: llm386_core::EdgeKind,
+) -> Result<()> {
+    let store = LmdbStore::open(store_path, StoreConfig::default())
+        .with_context(|| format!("opening store at {}", store_path.display()))?;
+    store.put_edge(llm386_core::Edge { from, to, kind })?;
+    println!("edge added: {from} --{kind:?}--> {to}");
+    Ok(())
+}
+
+fn edges(store_path: &Path, id: BlockId, incoming: bool) -> Result<()> {
+    let store = LmdbStore::open(store_path, StoreConfig::default())
+        .with_context(|| format!("opening store at {}", store_path.display()))?;
+    let edges = if incoming {
+        store.edges_to(id)?
+    } else {
+        store.edges_from(id)?
+    };
+    if edges.is_empty() {
+        println!("no edges");
+        return Ok(());
+    }
+    for edge in edges {
+        println!("{} --{:?}--> {}", edge.from, edge.kind, edge.to);
     }
     Ok(())
 }

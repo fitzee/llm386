@@ -16,7 +16,7 @@ mod types;
 use store::{LLM386Error, Store, Trace};
 use types::{
     ChatMessage, ContextBlock, ModelProfile, OmittedBlock, PackResult, PagePlan, Provenance,
-    TraceRecord,
+    Selection, TraceRecord,
 };
 
 #[pymodule]
@@ -26,6 +26,7 @@ fn llm386(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ContextBlock>()?;
     m.add_class::<Provenance>()?;
     m.add_class::<OmittedBlock>()?;
+    m.add_class::<Selection>()?;
     m.add_class::<PagePlan>()?;
     m.add_class::<ChatMessage>()?;
     m.add_class::<PackResult>()?;

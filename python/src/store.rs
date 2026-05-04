@@ -12,9 +12,10 @@ use pyo3::types::{PyBytes, PyString};
 use llm386_compress::{NoopSummarizer, TruncatingSummarizer};
 use llm386_compress_anthropic::AnthropicSummarizer;
 use llm386_core::{
-    BlockId, BlockKind, BlockStore, CallId, ContentHash, ContextBlock as RustBlock,
-    ModelRegistry, Packer, PageRequest, Pager, Provenance, SessionId, Summarizer, Timestamp,
-    TokenCounts, Tokenizer, TraceRecord as RustTraceRecord, TraceSink, default_registry,
+    BlockId, BlockKind, BlockStore, CallId, ContentHash, ContextBlock as RustBlock, Edge,
+    EdgeKind, ModelRegistry, Packer, PageRequest, Pager, Provenance, SessionId, Summarizer,
+    Timestamp, TokenCounts, Tokenizer, TraceRecord as RustTraceRecord, TraceSink,
+    default_registry,
 };
 use llm386_packer::SimplePacker;
 use llm386_pager::GreedyPager;
@@ -169,6 +170,49 @@ impl Store {
             .map_err(|e| LLM386Error::new_err(format!("purge_session: {e}")))
     }
 
+    /// Persist a typed directed edge from `from_id` to `to_id`. The
+    /// `kind` string is one of `"parent"`, `"derived-from"`,
+    /// `"supports"`, `"contradicts"`, `"tool-invocation"`. Idempotent:
+    /// re-adding the same triple is a no-op.
+    fn add_edge(&self, from_id: &str, to_id: &str, kind: &str) -> PyResult<()> {
+        let edge = Edge {
+            from: parse_block_id(from_id)?,
+            to: parse_block_id(to_id)?,
+            kind: parse_edge_kind(kind)?,
+        };
+        self.inner
+            .put_edge(edge)
+            .map_err(|e| LLM386Error::new_err(format!("put_edge: {e}")))
+    }
+
+    /// Outgoing edges from `block_id`. Returns a list of `(to_id_hex,
+    /// kind)` tuples.
+    fn edges_from(&self, block_id: &str) -> PyResult<Vec<(String, String)>> {
+        let id = parse_block_id(block_id)?;
+        let edges = self
+            .inner
+            .edges_from(id)
+            .map_err(|e| LLM386Error::new_err(format!("edges_from: {e}")))?;
+        Ok(edges
+            .into_iter()
+            .map(|e| (format!("{}", e.to), edge_kind_to_str(e.kind).to_string()))
+            .collect())
+    }
+
+    /// Incoming edges into `block_id`. Returns a list of `(from_id_hex,
+    /// kind)` tuples.
+    fn edges_to(&self, block_id: &str) -> PyResult<Vec<(String, String)>> {
+        let id = parse_block_id(block_id)?;
+        let edges = self
+            .inner
+            .edges_to(id)
+            .map_err(|e| LLM386Error::new_err(format!("edges_to: {e}")))?;
+        Ok(edges
+            .into_iter()
+            .map(|e| (format!("{}", e.from), edge_kind_to_str(e.kind).to_string()))
+            .collect())
+    }
+
     /// Run the pager and return the resulting plan.
     fn page(&self, session: u128, model: &str, task: &str) -> PyResult<PagePlan> {
         let (profile, tokenizer) = self.profile_and_tokenizer(model)?;
@@ -235,6 +279,7 @@ impl Store {
                     &trace_path,
                     SessionId(session),
                     &request.model.name,
+                    request.model.tokenizer.as_str(),
                     &plan,
                     chat_prompt.input_tokens,
                     started_at,
@@ -253,6 +298,7 @@ impl Store {
                     &trace_path,
                     SessionId(session),
                     &request.model.name,
+                    request.model.tokenizer.as_str(),
                     &plan,
                     prompt.input_tokens,
                     started_at,
@@ -276,6 +322,7 @@ impl Store {
         anthropic_model = None,
         anthropic_max_tokens = None,
     ))]
+    #[allow(clippy::too_many_arguments)] // PyO3 kwargs surface; bundling would obscure the API
     fn summarize(
         &self,
         session: u128,
@@ -391,10 +438,12 @@ impl Store {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors the trace record fields by design
 fn record_trace(
     path: &std::path::Path,
     session: SessionId,
     model: &str,
+    tokenizer_version: &str,
     plan: &llm386_core::PagePlan,
     prompt_tokens: llm386_core::TokenCount,
     started_at: Timestamp,
@@ -412,6 +461,10 @@ fn record_trace(
         prompt_hash: ContentHash::of(&[]),
         started_at,
         duration_ms,
+        model_version: model.to_string(),
+        tokenizer_version: tokenizer_version.to_string(),
+        output: None,
+        output_tokens: None,
     })
     .map_err(|e| LLM386Error::new_err(format!("record trace: {e}")))?;
     Ok(format!("{call_id}"))
@@ -444,6 +497,16 @@ impl Trace {
             .ok_or_else(|| LLM386Error::new_err(format!("no trace for {call_id}")))?;
         Ok(TraceRecord::from_rust(record))
     }
+
+    /// Patch the model output and output token count back into a
+    /// previously-recorded trace. Use after the model call returns
+    /// so the trace is replay-complete.
+    fn update_output(&self, call_id: &str, output: String, output_tokens: u32) -> PyResult<()> {
+        let id = parse_call_id(call_id)?;
+        self.sink
+            .update_output(id, output, llm386_core::TokenCount(output_tokens))
+            .map_err(|e| LLM386Error::new_err(format!("update_output: {e}")))
+    }
 }
 
 fn parse_call_id(s: &str) -> PyResult<CallId> {
@@ -475,6 +538,30 @@ fn parse_block_id(s: &str) -> PyResult<BlockId> {
     let n = u128::from_str_radix(s, 16)
         .map_err(|e| LLM386Error::new_err(format!("invalid block id `{s}`: {e}")))?;
     Ok(BlockId(n))
+}
+
+fn parse_edge_kind(s: &str) -> PyResult<EdgeKind> {
+    let kind = match s {
+        "parent" | "Parent" => EdgeKind::Parent,
+        "derived-from" | "DerivedFrom" => EdgeKind::DerivedFrom,
+        "supports" | "Supports" => EdgeKind::Supports,
+        "contradicts" | "Contradicts" => EdgeKind::Contradicts,
+        "tool-invocation" | "ToolInvocation" => EdgeKind::ToolInvocation,
+        other => {
+            return Err(LLM386Error::new_err(format!("unknown edge kind: {other}")));
+        }
+    };
+    Ok(kind)
+}
+
+const fn edge_kind_to_str(kind: EdgeKind) -> &'static str {
+    match kind {
+        EdgeKind::Parent => "parent",
+        EdgeKind::DerivedFrom => "derived-from",
+        EdgeKind::Supports => "supports",
+        EdgeKind::Contradicts => "contradicts",
+        EdgeKind::ToolInvocation => "tool-invocation",
+    }
 }
 
 fn now_ms() -> u64 {

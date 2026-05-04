@@ -4,7 +4,9 @@ use std::path::Path;
 
 use heed::types::{Bytes, Str};
 use heed::{Database, Env, EnvOpenOptions};
-use llm386_core::{BlockId, BlockStore, ContentHash, ContextBlock, SessionId, StoreError};
+use llm386_core::{
+    BlockId, BlockStore, ContentHash, ContextBlock, Edge, EdgeKind, SessionId, StoreError,
+};
 use thiserror::Error;
 use tracing::{debug, instrument};
 
@@ -49,6 +51,12 @@ pub struct LmdbStore {
     blocks_by_id: Database<Bytes, Bytes>,
     blocks_by_hash: Database<Bytes, Bytes>,
     blocks_by_session: Database<Bytes, Bytes>,
+    /// `(from || kind || to)` → `()`. Prefix-iter on `from` returns
+    /// every outgoing edge.
+    edges_from: Database<Bytes, Bytes>,
+    /// `(to || kind || from)` → `()`. Mirror of `edges_from` for
+    /// reverse lookups.
+    edges_to: Database<Bytes, Bytes>,
     #[allow(dead_code)] // reserved for future schema migrations
     meta: Database<Str, Bytes>,
 }
@@ -89,6 +97,8 @@ impl LmdbStore {
         let blocks_by_id = env.create_database(&mut wtxn, Some("blocks_by_id"))?;
         let blocks_by_hash = env.create_database(&mut wtxn, Some("blocks_by_hash"))?;
         let blocks_by_session = env.create_database(&mut wtxn, Some("blocks_by_session"))?;
+        let edges_from = env.create_database(&mut wtxn, Some("edges_from"))?;
+        let edges_to = env.create_database(&mut wtxn, Some("edges_to"))?;
         let meta: Database<Str, Bytes> = env.create_database(&mut wtxn, Some("meta"))?;
 
         if let Some(existing) = meta.get(&wtxn, "schema_version")? {
@@ -113,6 +123,8 @@ impl LmdbStore {
             blocks_by_id,
             blocks_by_hash,
             blocks_by_session,
+            edges_from,
+            edges_to,
             meta,
         })
     }
@@ -237,6 +249,61 @@ impl BlockStore for LmdbStore {
         }
     }
 
+    fn put_edge(&self, edge: Edge) -> Result<(), StoreError> {
+        let kind = edge_kind_to_byte(edge.kind);
+        let from_key = edge_key(edge.from, kind, edge.to);
+        let to_key = edge_key(edge.to, kind, edge.from);
+        let mut wtxn = self.env.write_txn().map_err(|e| heed_err(&e))?;
+        self.edges_from
+            .put(&mut wtxn, &from_key, &[])
+            .map_err(|e| heed_err(&e))?;
+        self.edges_to
+            .put(&mut wtxn, &to_key, &[])
+            .map_err(|e| heed_err(&e))?;
+        wtxn.commit().map_err(|e| heed_err(&e))?;
+        Ok(())
+    }
+
+    fn edges_from(&self, from: BlockId) -> Result<Vec<Edge>, StoreError> {
+        let rtxn = self.env.read_txn().map_err(|e| heed_err(&e))?;
+        let prefix = from.0.to_be_bytes();
+        let iter = self
+            .edges_from
+            .prefix_iter(&rtxn, &prefix)
+            .map_err(|e| heed_err(&e))?;
+        let mut out = Vec::new();
+        for entry in iter {
+            let (key, _) = entry.map_err(|e| heed_err(&e))?;
+            let (k, to) = parse_edge_key_suffix(key)?;
+            out.push(Edge {
+                from,
+                to,
+                kind: edge_kind_from_byte(k)?,
+            });
+        }
+        Ok(out)
+    }
+
+    fn edges_to(&self, to: BlockId) -> Result<Vec<Edge>, StoreError> {
+        let rtxn = self.env.read_txn().map_err(|e| heed_err(&e))?;
+        let prefix = to.0.to_be_bytes();
+        let iter = self
+            .edges_to
+            .prefix_iter(&rtxn, &prefix)
+            .map_err(|e| heed_err(&e))?;
+        let mut out = Vec::new();
+        for entry in iter {
+            let (key, _) = entry.map_err(|e| heed_err(&e))?;
+            let (k, from) = parse_edge_key_suffix(key)?;
+            out.push(Edge {
+                from,
+                to,
+                kind: edge_kind_from_byte(k)?,
+            });
+        }
+        Ok(out)
+    }
+
     #[instrument(skip(self), fields(id = %id))]
     fn delete(&self, id: BlockId) -> Result<bool, StoreError> {
         let mut wtxn = self.env.write_txn().map_err(|e| heed_err(&e))?;
@@ -295,6 +362,8 @@ impl BlockStore for LmdbStore {
                 .delete(&mut wtxn, &hash.0)
                 .map_err(|e| heed_err(&e))?;
         }
+        // Edges referencing this block in either direction.
+        purge_edges_for_block(&mut wtxn, &self.edges_from, &self.edges_to, id)?;
         wtxn.commit().map_err(|e| heed_err(&e))?;
         debug!(
             ?id,
@@ -375,6 +444,7 @@ impl BlockStore for LmdbStore {
                 self.blocks_by_hash
                     .delete(&mut wtxn, &block.hash.0)
                     .map_err(|e| heed_err(&e))?;
+                purge_edges_for_block(&mut wtxn, &self.edges_from, &self.edges_to, id)?;
             }
         }
 
@@ -628,6 +698,108 @@ fn decode_block_id(bytes: &[u8]) -> Result<BlockId, StoreError> {
     Ok(BlockId(u128::from_be_bytes(arr)))
 }
 
+/// Encode `(primary, kind, other)` as a 33-byte LMDB key:
+/// `primary(16) || kind(1) || other(16)`. Used symmetrically by both
+/// the `edges_from` and `edges_to` tables.
+fn edge_key(primary: BlockId, kind: u8, other: BlockId) -> [u8; 33] {
+    let mut buf = [0u8; 33];
+    buf[..16].copy_from_slice(&primary.0.to_be_bytes());
+    buf[16] = kind;
+    buf[17..].copy_from_slice(&other.0.to_be_bytes());
+    buf
+}
+
+/// Parse the `(kind, other)` suffix out of an edge key, given that
+/// the iterator already established the 16-byte primary prefix.
+fn parse_edge_key_suffix(key: &[u8]) -> Result<(u8, BlockId), StoreError> {
+    if key.len() != 33 {
+        return Err(StoreError::Backend(format!("edge key width {}", key.len())));
+    }
+    let kind = key[16];
+    let other = decode_block_id(&key[17..])?;
+    Ok((kind, other))
+}
+
+fn edge_kind_to_byte(kind: EdgeKind) -> u8 {
+    match kind {
+        EdgeKind::Parent => 1,
+        EdgeKind::DerivedFrom => 2,
+        EdgeKind::Supports => 3,
+        EdgeKind::Contradicts => 4,
+        EdgeKind::ToolInvocation => 5,
+    }
+}
+
+fn edge_kind_from_byte(b: u8) -> Result<EdgeKind, StoreError> {
+    match b {
+        1 => Ok(EdgeKind::Parent),
+        2 => Ok(EdgeKind::DerivedFrom),
+        3 => Ok(EdgeKind::Supports),
+        4 => Ok(EdgeKind::Contradicts),
+        5 => Ok(EdgeKind::ToolInvocation),
+        n => Err(StoreError::Backend(format!("unknown EdgeKind byte {n}"))),
+    }
+}
+
+/// Drop every edge referencing `id` in either direction, including
+/// the mirror entry on the other side of the pair.
+fn purge_edges_for_block(
+    wtxn: &mut heed::RwTxn<'_>,
+    edges_from: &Database<Bytes, Bytes>,
+    edges_to: &Database<Bytes, Bytes>,
+    id: BlockId,
+) -> Result<(), StoreError> {
+    let prefix = id.0.to_be_bytes();
+
+    // Outgoing: collect (kind, to) pairs, then delete the mirror in
+    // edges_to and the primary in edges_from.
+    let outgoing: Vec<(u8, BlockId)> = {
+        let iter = edges_from
+            .prefix_iter(wtxn, &prefix)
+            .map_err(|e| heed_err(&e))?;
+        let mut acc = Vec::new();
+        for entry in iter {
+            let (key, _) = entry.map_err(|e| heed_err(&e))?;
+            acc.push(parse_edge_key_suffix(key)?);
+        }
+        acc
+    };
+    for (kind, to) in &outgoing {
+        let from_key = edge_key(id, *kind, *to);
+        edges_from
+            .delete(wtxn, &from_key)
+            .map_err(|e| heed_err(&e))?;
+        let to_key = edge_key(*to, *kind, id);
+        edges_to
+            .delete(wtxn, &to_key)
+            .map_err(|e| heed_err(&e))?;
+    }
+
+    // Incoming: collect (kind, from) pairs, then delete the mirror in
+    // edges_from and the primary in edges_to.
+    let incoming: Vec<(u8, BlockId)> = {
+        let iter = edges_to
+            .prefix_iter(wtxn, &prefix)
+            .map_err(|e| heed_err(&e))?;
+        let mut acc = Vec::new();
+        for entry in iter {
+            let (key, _) = entry.map_err(|e| heed_err(&e))?;
+            acc.push(parse_edge_key_suffix(key)?);
+        }
+        acc
+    };
+    for (kind, from) in &incoming {
+        let to_key = edge_key(id, *kind, *from);
+        edges_to.delete(wtxn, &to_key).map_err(|e| heed_err(&e))?;
+        let from_key = edge_key(*from, *kind, id);
+        edges_from
+            .delete(wtxn, &from_key)
+            .map_err(|e| heed_err(&e))?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,6 +1050,63 @@ mod tests {
         let (store, _dir) = open_tmp();
         let id = BlockId::from_parts(0, 0);
         assert!(store.get(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn put_edge_then_edges_from_and_edges_to_roundtrip() {
+        let (store, _dir) = open_tmp();
+        let s = SessionId(1);
+        let a = store.put(s, make_block(b"A", BlockKind::Fact, 1, 1)).unwrap();
+        let b = store.put(s, make_block(b"B", BlockKind::Fact, 2, 2)).unwrap();
+        let c = store.put(s, make_block(b"C", BlockKind::Fact, 3, 3)).unwrap();
+        store
+            .put_edge(Edge { from: a, to: b, kind: EdgeKind::Supports })
+            .unwrap();
+        store
+            .put_edge(Edge { from: a, to: c, kind: EdgeKind::DerivedFrom })
+            .unwrap();
+
+        let outgoing = store.edges_from(a).unwrap();
+        assert_eq!(outgoing.len(), 2);
+        assert!(outgoing.iter().any(|e| e.to == b && e.kind == EdgeKind::Supports));
+        assert!(outgoing.iter().any(|e| e.to == c && e.kind == EdgeKind::DerivedFrom));
+
+        let incoming_b = store.edges_to(b).unwrap();
+        assert_eq!(incoming_b, vec![Edge { from: a, to: b, kind: EdgeKind::Supports }]);
+        assert!(store.edges_to(a).unwrap().is_empty());
+    }
+
+    #[test]
+    fn put_edge_is_idempotent() {
+        let (store, _dir) = open_tmp();
+        let s = SessionId(1);
+        let a = store.put(s, make_block(b"A", BlockKind::Fact, 1, 1)).unwrap();
+        let b = store.put(s, make_block(b"B", BlockKind::Fact, 2, 2)).unwrap();
+        let edge = Edge { from: a, to: b, kind: EdgeKind::Parent };
+        store.put_edge(edge).unwrap();
+        store.put_edge(edge).unwrap();
+        assert_eq!(store.edges_from(a).unwrap().len(), 1);
+        assert_eq!(store.edges_to(b).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delete_block_purges_edges_in_both_directions() {
+        let (store, _dir) = open_tmp();
+        let s = SessionId(1);
+        let a = store.put(s, make_block(b"A", BlockKind::Fact, 1, 1)).unwrap();
+        let b = store.put(s, make_block(b"B", BlockKind::Fact, 2, 2)).unwrap();
+        store
+            .put_edge(Edge { from: a, to: b, kind: EdgeKind::Supports })
+            .unwrap();
+        store
+            .put_edge(Edge { from: b, to: a, kind: EdgeKind::Contradicts })
+            .unwrap();
+        assert!(store.delete(a).unwrap());
+        assert!(store.edges_from(a).unwrap().is_empty());
+        assert!(store.edges_to(a).unwrap().is_empty());
+        // The mirror entries on b are gone too.
+        assert!(store.edges_from(b).unwrap().is_empty());
+        assert!(store.edges_to(b).unwrap().is_empty());
     }
 
     #[test]

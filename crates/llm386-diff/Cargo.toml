@@ -1,0 +1,16 @@
+[package]
+name = "llm386-diff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Structured diffs between LLM386 page plans and trace records."
+
+[lints]
+workspace = true
+
+[dependencies]
+llm386-core = { workspace = true }
+serde = { workspace = true }

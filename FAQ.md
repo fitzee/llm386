@@ -1,7 +1,21 @@
 # Frequently asked questions
 
+## Quick index
+
+- What does the model see? → [How it works](#how-it-works)
+- How fast is it? → [Performance and sizing](#performance-and-sizing)
+- How do I delete data? → [Data lifecycle](#data-lifecycle)
+- How do sessions work? → [Sessions and multi-tenancy](#sessions-and-multi-tenancy)
+- How does retrieval work? → [Retrieval and RAG](#retrieval-and-rag)
+- How do tools integrate? → [How do MCP servers and tools work with this?](#how-do-mcp-servers-and-tools-work-with-this-do-tool-schemas-get-committed-to-memory-like-other-facts)
+- How can things go wrong? → [Failure modes](#failure-modes)
+
+## Full table of contents
+
 - [Naming and motivation](#naming-and-motivation)
   - [The README mentions EMM386. What was it, and how is LLM386 similar?](#the-readme-mentions-emm386-what-was-it-and-how-is-llm386-similar)
+- [How it works](#how-it-works)
+  - [How does the context in LLM386 get exposed to the LLM model?](#how-does-the-context-in-llm386-get-exposed-to-the-llm-model)
 - [Performance and sizing](#performance-and-sizing)
   - [How much latency does this add to my agent?](#how-much-latency-does-this-add-to-my-agent)
   - [How big can the memory store get?](#how-big-can-the-memory-store-get)
@@ -16,8 +30,11 @@
   - [Can I assert facts that are available to every session?](#can-i-assert-facts-that-are-available-to-every-session)
   - [Can multiple agents share the same memory store?](#can-multiple-agents-share-the-same-memory-store)
 - [Retrieval and RAG](#retrieval-and-rag)
+  - [Score normalization](#score-normalization)
   - [How does it work with RAG, and does it store links to blobs/documents?](#how-does-it-work-with-rag-and-does-it-store-links-to-blobsdocuments)
   - [How do I write a custom retriever for Pinecone, and wire it in?](#how-do-i-write-a-custom-retriever-for-pinecone-and-wire-it-in)
+  - [How do MCP servers and tools work with this?](#how-do-mcp-servers-and-tools-work-with-this-do-tool-schemas-get-committed-to-memory-like-other-facts)
+- [Failure modes](#failure-modes)
 - [Comparison and adoption](#comparison-and-adoption)
   - [Why should I use this over other approaches?](#why-should-i-use-this-over-other-approaches)
 
@@ -43,6 +60,119 @@ LLM386 does the same trick for LLM context windows.
 In both cases the underlying constraint never moves — DOS still only sees 640 KB, the model still only gets its context window. The trick is making a much larger external memory available *through* that window, by paging only what's relevant for the current operation.
 
 The 386 in the name is also a tip of the hat to the era. There is no special significance to the number beyond the homage.
+
+---
+
+## How it works
+
+### How does the context in LLM386 get exposed to the LLM model?
+
+**Core mental model.** LLM386 does not extend the model's context window. It constructs a bounded working set for each call by selecting, ordering, and rendering blocks from a larger persistent memory. Every model invocation is independent; continuity is achieved by recomputing the working set each time.
+
+LLM386 never calls the model itself. It produces a `PackedPrompt` (or a `ChatPrompt`) and hands it back to your agent code, which then makes the actual API call. This is a deliberate boundary: the runtime owns context assembly, your code owns inference.
+
+There are two output shapes, and which one you use depends on the API you're calling.
+
+**Single-string mode (`pack`).** `Store.pack(...)` returns a `PackedPrompt` with a `rendered: String` field — one Markdown-shaped document with section headers in a fixed canonical order:
+
+```
+## System
+You are a careful expert.
+
+## Task
+Explain Australia's history.
+
+## State
+<active state blocks>
+
+## Plan
+<plan blocks>
+
+## Retrieved memory
+<facts and document chunks the retrievers surfaced>
+
+## Tools
+<tool result blocks>
+
+## Recent
+<recent user/assistant turns>
+
+## Background
+<low-priority context>
+```
+
+The order is hardcoded and the tokenizer is the model's own, so the rendered string is byte-identical for the same inputs (this is what makes traces replay-cleanly). You hand this string to a completion-style API as a single prompt:
+
+```python
+result = store.pack(session=1, model="gpt-4o", task="...")
+response = openai.completions.create(model="gpt-4o", prompt=result.rendered)
+```
+
+**Chat-message mode (`pack_chat`).** Most modern LLM APIs are chat-shaped, not completion-shaped. `Store.pack(..., chat=True)` returns a `ChatPrompt` with a `messages: List[ChatMessage]` field — a list of role-tagged messages ready to drop into a chat-completion API. The packer maps blocks to roles like this:
+
+| `BlockKind`        | Chat role     |
+|--------------------|---------------|
+| `System`           | `system`      |
+| `UserMessage`      | `user`        |
+| `AssistantMessage` | `assistant`   |
+| `ToolResult`       | `tool`        |
+| Other kinds (`Fact`, `DocumentChunk`, `Plan`, `State`, `Summary`, ...) | `user`, with section headers preserved as Markdown inside the body |
+
+The current task ends up as the final `user` message so it's positioned where the model expects "what to do next." If the model's `ModelProfile` has `supports_system_role = false` (some local models, some Anthropic configurations), the packer folds system content into the first `user` message instead — so you don't have to think about per-model quirks.
+
+```python
+result = store.pack(session=1, model="gpt-4o", task="...", chat=True)
+response = openai.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": m.role, "content": m.content} for m in result.messages],
+)
+```
+
+**What the model never sees.** The rule is absolute: anything not serialized into the final prompt (string or messages) does not exist to the model. Store state ≠ model state. Concretely:
+
+- *Block ids, hashes, provenance.* These live in the store for your benefit (replay, audit, deletion), not the model's. The packer renders only the bytes.
+- *Edges.* Typed edges between blocks shape *which* blocks the pager picks, but the edges themselves aren't serialized into the prompt.
+- *Tool schemas.* These belong in the API's `tools` parameter, not the prompt body. See ["How do MCP servers and tools work with this?"](#how-do-mcp-servers-and-tools-work-with-this-do-tool-schemas-get-committed-to-memory-like-other-facts) for why.
+
+**Determinism guarantee.** Same blocks + same model profile + same task ⟹ same rendered string (or same chat message list) ⟹ same prompt hash in the trace. Determinism holds *only* if all four of the following hold:
+
+- block ordering is stable (controlled by `BlockId` ordering inside each section);
+- tokenizer version is identical (the `tokenizer_version` field on the trace catches drift);
+- packer logic is unchanged (rebuilding the binary against a different `SimplePacker` breaks byte-equality);
+- retriever outputs are deterministic (random-seeded ANN, time-of-day-keyed retrievers, or a network retriever returning paginated results in different orders all break this).
+
+Under those conditions `llm386 trace diff` is meaningful and you can reproduce "what did the model see two weeks ago when it gave that answer?" exactly. Outside those conditions the trace still tells you what the model saw on that specific call, but a re-run is not guaranteed to match.
+
+**A worked packing example.** Given:
+
+- 2 system blocks
+- 1 task
+- 3 retrieved facts
+- 2 recent messages
+
+the packed prompt becomes:
+
+```
+## System
+<system block 1>
+<system block 2>
+
+## Task
+<task>
+
+## Retrieved memory
+<fact 1>
+<fact 2>
+<fact 3>
+
+## Recent
+<recent message 1>
+<recent message 2>
+
+Total tokens: 2413 / 8192
+```
+
+Empty sections are omitted. Token totals are reported in the manifest header that `llm386 pack` prints to stderr (and on the `PackedPrompt.input_tokens` field programmatically).
 
 ---
 
@@ -192,7 +322,9 @@ For stronger isolation between tenants (compliance, key separation, regulatory b
 
 ### A user has many sessions. How does memory span them?
 
-The runtime treats every block as belonging to exactly one `SessionId`, so cross-session memory is something you opt into rather than something that happens by default. Three patterns work:
+The runtime treats every block as belonging to exactly one `SessionId`, so cross-session memory is something you opt into rather than something that happens by default. Cross-session retrieval is a *retrieval policy*, not a storage capability — blocks remain physically scoped to their original session, and a custom retriever decides whether to surface blocks from other sessions when assembling a working set. Sessions define storage boundaries, not logical memory boundaries.
+
+Three patterns work:
 
 **One session per user, many turns.** Use a single `SessionId` for everything that user does and let the pager surface relevant turns from across the whole history. Simplest model. Works well when "user" and "agent" are the same conceptual thing.
 
@@ -261,6 +393,8 @@ Yes, with two flavors.
 
 **Cross-process.** LMDB is designed for multi-process access too. Each process opens its own `LmdbStore` at the same path; committed writes from one are immediately visible to readers in the others. File-level locking serializes writes across processes. The major caveat: this only works on local filesystems with proper mmap semantics. NFS, some networked filesystems, and certain container overlay filesystems don't behave correctly under LMDB's mmap model. POSIX local filesystems (ext4, xfs, APFS) are fine.
 
+**Consistency model.** Reads observe a consistent snapshot taken at transaction start: a long read transaction will not see writes that commit after it began, even from other processes. Writes become visible atomically after commit — there is no partial visibility of a multi-key write. Practically: a `pack` call that opens its read transaction at T sees the store as it was at T, regardless of what concurrent writers are doing.
+
 **Two flavors of "sharing"** are worth distinguishing:
 
 - *Sharing the store, with separate sessions.* Each agent owns one or more `SessionId`s. They never see each other's blocks unless a custom retriever reads across sessions. This is the right pattern for a multi-agent system where each agent has its own memory scope.
@@ -271,6 +405,10 @@ For strong isolation between tenants (different customers, regulatory boundaries
 ---
 
 ## Retrieval and RAG
+
+### Score normalization
+
+All retriever scores must be normalized to `[0, 1]`. If you mix scoring systems (BM25 raw scores, cosine similarity, recency decay), normalize them inside each retriever before returning candidates. The pager merges by `BlockId` with max-score wins; it assumes comparability and does not fix mismatched scales. A retriever that returns scores in `[0, 100]` will silently drown out one returning `[0, 1]`. If you don't know the right normalization for your retriever, clamp aggressively (`score.clamp(0.0, 1.0)`) and tune the weight upward later.
 
 ### How does it work with RAG, and does it store links to blobs/documents?
 
@@ -424,6 +562,76 @@ store.add_python_retriever(PineconeRetriever(client, index, embedder))
 ```
 
 The Rust pager calls back into your Python code on every `page()` / `pack()`. Same composition rules as the Rust retrievers above — the pager merges by `BlockId` (max score wins). Use whichever side fits your stack better; for production-scale latency the Rust path will always win, but the Python path is fine for correctness and easy iteration.
+
+### How do MCP servers and tools work with this? Do tool schemas get committed to memory like other facts?
+
+LLM386 doesn't speak MCP itself, and it doesn't dial out to tools. It is the memory layer your agent reads and writes around the model call. Your agent loop still owns tool dispatch, MCP client connections, and schema discovery. LLM386 just stores the byproducts of those interactions as blocks so they're available on the next turn.
+
+The question of whether tool schemas should live in memory has two answers depending on which schemas you mean:
+
+**Schemas you pass to the model on every call.** OpenAI/Anthropic/etc. take a `tools` array as a separate API parameter, not as prompt text. Don't put those in LLM386. Build the tool list at request time from your MCP client (`list_tools()` per connected server) and pass it to the model alongside whatever LLM386 packed. The model's tool-calling layer is not part of the prompt and not part of the working set.
+
+**Schemas as facts the model needs to reason about.** Sometimes the agent needs to know that a tool exists in order to plan ("if the user asks about Jira, the `create_issue` tool is available"). For that, store a small `Fact` block per tool — name, one-line description, key arguments. Tag it with a label like `tool:jira:create_issue`, set a low priority so it doesn't crowd everything else, and let the lexical/BM25 retriever surface it when the task mentions the relevant domain. Refresh these blocks whenever the MCP server's tool list changes (re-`put` is idempotent thanks to content-hash dedup).
+
+Tool *results* are different and absolutely belong in memory. Store each one as a `ToolResult` block with `parents=[assistant_message_id]` so the pager keeps the call/result paired. Edge-aware paging (`include_parents`) will pull the assistant message back in when only the result was retrieved, and the chat packer renders results with the `tool` role so the model sees them in the right slot. This is the path that most MCP-driven agents care about: the model called `read_file`, the result came back as 4KB of code, you commit it once, and every subsequent turn that retrieves it benefits from the dedup, summarization, and budget-aware packing.
+
+Practical pattern for an MCP-shaped loop:
+
+```python
+# 1. Build tool list at request time from your MCP client.
+tools = mcp_client.list_tools()  # not stored in LLM386
+
+# 2. Pack memory + send.
+result = store.pack(session=sid, model="gpt-4o",
+                    task=user_input, chat=True)
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": m.role, "content": m.content} for m in result.messages],
+    tools=tools,
+)
+
+# 3. Persist the assistant turn.
+asst_id = store.put(sid, kind="assistant-message",
+                    body=response.choices[0].message.content or "")
+
+# 4. Persist each tool result with the assistant turn as parent.
+for call in response.choices[0].message.tool_calls or []:
+    tool_output = mcp_client.invoke(call)
+    store.put(sid, kind="tool-result",
+              body=tool_output, parents=[asst_id],
+              labels=[f"tool:{call.function.name}"])
+```
+
+Tool schemas come from the MCP server. Tool *evidence* — what the tool returned, what the assistant did with it — comes from LLM386. Keep that boundary and the working-set math stays sane.
+
+**Sizing tool outputs.** Tool results may exceed context budgets. A `read_file` against a 200 KB log, a `grep` returning thousands of matches, or a `db.query` returning a wide result set will blow past most section budgets and dominate retrieval on subsequent turns (one giant `ToolResult` block crowds out everything else). Mitigations, in order of preference:
+
+- **Summarize** the result before storing — keep the raw output in a side store and put a short structured summary as the `ToolResult` block.
+- **Chunk** the result into multiple `ToolResult` blocks (one per record, page, or logical group) so the pager can pick the relevant subset.
+- **Reduce priority** on the raw block (`priority` ≤ 0.1) and rely on retrievers to surface it only when actually relevant; pair with a Summary block for the typical case.
+
+Doing none of the above is fine for small tool outputs (a single API call returning a few hundred tokens) but degrades quickly as outputs grow.
+
+---
+
+## Failure modes
+
+The runtime makes context assembly inspectable; it doesn't prevent you from feeding it nonsense. Common failure modes when running LLM386 in production:
+
+- **Context flooding.** Too many large blocks survive into the working set, the model gets a low-signal prompt, answers degrade. Usually a symptom of unbounded ingest (chat logs, raw tool outputs) and no compensating section budget tightening.
+- **Retriever dominance.** One retriever (often a brand-new ANN retriever or a buggy custom one) returns inflated scores and crowds out everything else. Symptoms: every prompt looks similar; the recency retriever stops mattering; `trace diff` shows the same blocks selected turn after turn.
+- **Stale facts.** A `Fact` block that was true a month ago keeps getting retrieved by lexical matches and the model parrots it as current. The runtime has no notion of fact expiry — that's an application policy.
+- **Over-summarization.** The COLD-tier summary substitution kicks in, an important detail in the original block is missing from the summary, and the model now has *less* useful information than if the original had been omitted entirely.
+- **Token fragmentation.** Many small low-value blocks (one fact per sentence, one log line per block) clog the section budgets even when individually each looks cheap.
+
+Mitigations:
+
+- **Normalize and weight retrievers.** Enforce `[0, 1]` scores per retriever (see the [score normalization](#score-normalization) note). Tune retriever weights against a held-out set of representative tasks.
+- **Purge or downgrade stale blocks.** Either delete via `purge` or push priority toward `0.0` so they only surface when nothing else is relevant. Application-side TTL policies are easy to add.
+- **Summarize cold data.** Run `llm386 summarize --store-summary` periodically. Pair with the pager's `summary_fallback` policy so summaries are substituted only when the original blocks don't fit.
+- **Enforce section budgets.** A tight `Recent` budget bounds chat-history bloat; a tight `Tools` budget bounds tool-result bloat. Default budgets are starting points, not invariants — override per workload.
+
+`llm386 trace diff` between a healthy turn and a degraded turn is the fastest way to localize which of these is biting you.
 
 ---
 

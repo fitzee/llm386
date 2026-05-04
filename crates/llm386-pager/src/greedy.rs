@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use llm386_core::{
     BlockId, BlockKind, BlockStore, ContextBlock, OmissionReason, OmittedBlock, PagePlan,
-    PageRequest, Pager, PagerError, Retriever, SectionKind, TokenCount, Tokenizer,
+    PageRequest, Pager, PagerError, Retriever, SectionKind, Selection, SelectionReason,
+    TokenCount, Tokenizer,
 };
 use tracing::instrument;
 
@@ -40,8 +41,8 @@ const RETRIEVAL_LIMIT: usize = 4_096;
 /// `tool_call` (or assistant message) that produced them. Default
 /// `false` to preserve the prior behavior.
 ///
-/// `summary_fallback` enables the COLD-tier behavior from CLAUDE.md.
-/// When `true`, a candidate that doesn't fit its section budget is
+/// `summary_fallback` enables COLD-tier substitution. When `true`, a
+/// candidate that doesn't fit its section budget is
 /// checked against an in-session "summary index" — if a Summary
 /// block exists whose `Provenance.parents` includes the candidate,
 /// the pager tries to fit the *summary* instead, marking the
@@ -163,6 +164,7 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
 
         let input_budget = request.model.input_budget();
         let mut selected: Vec<BlockId> = Vec::with_capacity(request.required_blocks.len());
+        let mut selections: Vec<Selection> = Vec::with_capacity(request.required_blocks.len());
         let mut omitted: Vec<OmittedBlock> = Vec::new();
         // `prompt_total` includes the synthesized Task — the global
         // ceiling that no section may push past. `block_tokens` is
@@ -187,6 +189,7 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
             prompt_total = prompt_total.saturating_add(tokens);
             block_tokens = block_tokens.saturating_add(tokens);
             selected.push(id);
+            selections.push(Selection { block_id: id, score: 1.0, reason: SelectionReason::Pinned });
             required_set.insert(id);
         }
 
@@ -258,6 +261,11 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
                     prompt_total = prompt_total.saturating_add(cand.tokens);
                     block_tokens = block_tokens.saturating_add(cand.tokens);
                     selected.push(cand.id);
+                    selections.push(Selection {
+                        block_id: cand.id,
+                        score: cand.score,
+                        reason: SelectionReason::HighRelevance,
+                    });
                 } else {
                     omitted.push(OmittedBlock {
                         block_id: cand.id,
@@ -322,6 +330,11 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
                     prompt_total = next_global;
                     block_tokens = block_tokens.saturating_add(cand.tokens);
                     selected.push(cand.id);
+                    selections.push(Selection {
+                        block_id: cand.id,
+                        score: cand.score,
+                        reason: SelectionReason::HighRelevance,
+                    });
                     if let Some(set) = cand.word_set {
                         section_word_sets.push(set);
                     }
@@ -359,6 +372,11 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
                         prompt_total = s_global_next;
                         block_tokens = block_tokens.saturating_add(s_tokens);
                         selected.push(summary_id);
+                        selections.push(Selection {
+                            block_id: summary_id,
+                            score: cand.score,
+                            reason: SelectionReason::HighRelevance,
+                        });
                         compressed_into.insert(summary_id);
                         omitted.push(OmittedBlock {
                             block_id: cand.id,
@@ -397,7 +415,15 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
                 let Some(block) = self.store.get(id)? else {
                     continue;
                 };
-                for &parent_id in &block.provenance.parents {
+                // Lineage from `Provenance.parents` plus any typed
+                // outgoing edges from the typed edges table. The
+                // store returns an empty vec if no edges DB exists,
+                // so this is a no-op for legacy backends.
+                let mut deps: Vec<BlockId> = block.provenance.parents.clone();
+                for edge in self.store.edges_from(id)? {
+                    deps.push(edge.to);
+                }
+                for parent_id in deps {
                     if !visited.insert(parent_id) {
                         continue;
                     }
@@ -409,6 +435,11 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
                         prompt_total = prompt_total.saturating_add(tokens);
                         block_tokens = block_tokens.saturating_add(tokens);
                         selected.push(parent_id);
+                        selections.push(Selection {
+                            block_id: parent_id,
+                            score: 0.0,
+                            reason: SelectionReason::Dependency,
+                        });
                         frontier.push(parent_id);
                     }
                     // If the parent didn't fit we still mark it visited
@@ -420,6 +451,7 @@ impl<S: BlockStore + 'static> Pager for GreedyPager<S> {
 
         Ok(PagePlan {
             selected,
+            selections,
             omitted,
             estimated_tokens: block_tokens,
         })
@@ -581,6 +613,35 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, PagerError::RequiredBlockMissing(id) if id == bogus));
+    }
+
+    #[test]
+    fn selections_are_kept_in_lockstep_with_selected() {
+        // Each selected id must have a matching Selection entry; the
+        // pinned required block must be tagged as Pinned.
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        let pinned = store
+            .put(session, block(b"pinned-fact", BlockKind::Fact, 1, 1))
+            .unwrap();
+        store
+            .put(session, block(b"side-info", BlockKind::UserMessage, 2, 2))
+            .unwrap();
+        let pager = GreedyPager::new(store, tok);
+        let plan = pager
+            .page(PageRequest {
+                session_id: session,
+                task: "x".into(),
+                model: profile(1_000, 100),
+                required_blocks: vec![pinned],
+            })
+            .unwrap();
+        assert_eq!(plan.selected.len(), plan.selections.len());
+        for (id, sel) in plan.selected.iter().zip(plan.selections.iter()) {
+            assert_eq!(*id, sel.block_id);
+        }
+        let pinned_sel = plan.selections.iter().find(|s| s.block_id == pinned).unwrap();
+        assert!(matches!(pinned_sel.reason, SelectionReason::Pinned));
     }
 
     #[test]
@@ -858,6 +919,51 @@ mod tests {
         // ancestor walk.
         assert!(plan.selected.contains(&child_id));
         assert!(plan.selected.contains(&parent_id));
+    }
+
+    #[test]
+    fn include_parents_follows_typed_edges_too() {
+        // Pulled-in dependencies can come from `Provenance.parents`
+        // *or* from the typed edges table. The pager treats both as
+        // SelectionReason::Dependency.
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        let evidence_id = store
+            .put(session, block(b"the supporting fact", BlockKind::Fact, 1, 1))
+            .unwrap();
+        let claim_id = store
+            .put(session, block(b"the claim", BlockKind::AssistantMessage, 2, 2))
+            .unwrap();
+        store
+            .put_edge(llm386_core::Edge {
+                from: claim_id,
+                to: evidence_id,
+                kind: llm386_core::EdgeKind::Supports,
+            })
+            .unwrap();
+
+        let policy = ScoringPolicy {
+            include_parents: true,
+            ..ScoringPolicy::default()
+        };
+        let pager = GreedyPager::new(store, tok)
+            .with_retrievers(vec![])
+            .with_scoring(policy);
+        let plan = pager
+            .page(PageRequest {
+                session_id: session,
+                task: String::new(),
+                model: profile(1_000, 0),
+                required_blocks: vec![claim_id],
+            })
+            .unwrap();
+        assert!(plan.selected.contains(&evidence_id));
+        let evidence_sel = plan
+            .selections
+            .iter()
+            .find(|s| s.block_id == evidence_id)
+            .unwrap();
+        assert!(matches!(evidence_sel.reason, SelectionReason::Dependency));
     }
 
     #[test]

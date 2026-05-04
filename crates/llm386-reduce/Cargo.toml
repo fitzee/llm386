@@ -1,0 +1,19 @@
+[package]
+name = "llm386-reduce"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Reducers for turning model output into state and event blocks for LLM386."
+
+[lints]
+workspace = true
+
+[dependencies]
+llm386-core = { workspace = true }
+blake3 = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+thiserror = { workspace = true }

@@ -155,6 +155,7 @@ mod tests {
             model: "gpt-4o".into(),
             plan: PagePlan {
                 selected: vec![],
+                selections: vec![],
                 omitted: vec![],
                 estimated_tokens: TokenCount(0),
             },
@@ -162,6 +163,10 @@ mod tests {
             prompt_hash: ContentHash::of(b""),
             started_at: Timestamp(1_000),
             duration_ms: 0,
+            model_version: "gpt-4o-2024-08-06".into(),
+            tokenizer_version: "o200k_base".into(),
+            output: None,
+            output_tokens: None,
         }
     }
 
@@ -194,6 +199,32 @@ mod tests {
         };
         let sink = LmdbTraceSink::open(dir.path()).unwrap();
         assert!(sink.fetch(id).unwrap().is_some());
+    }
+
+    #[test]
+    fn update_output_patches_in_model_response() {
+        let dir = TempDir::new().unwrap();
+        let sink = LmdbTraceSink::open(dir.path()).unwrap();
+        let rec = fake_record(11);
+        sink.record(rec.clone()).unwrap();
+        sink.update_output(rec.call_id, "the answer is 42".into(), TokenCount(5))
+            .unwrap();
+        let patched = sink.fetch(rec.call_id).unwrap().unwrap();
+        assert_eq!(patched.output.as_deref(), Some("the answer is 42"));
+        assert_eq!(patched.output_tokens, Some(TokenCount(5)));
+        // Untouched fields stay intact.
+        assert_eq!(patched.model, rec.model);
+        assert_eq!(patched.model_version, rec.model_version);
+    }
+
+    #[test]
+    fn update_output_on_unknown_call_errors() {
+        let dir = TempDir::new().unwrap();
+        let sink = LmdbTraceSink::open(dir.path()).unwrap();
+        let err = sink
+            .update_output(CallId(404), "x".into(), TokenCount(1))
+            .unwrap_err();
+        assert!(matches!(err, llm386_core::TraceError::Failed(_)));
     }
 
     #[test]

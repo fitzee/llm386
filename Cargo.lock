@@ -1176,6 +1176,7 @@ dependencies = [
  "llm386-compress",
  "llm386-compress-anthropic",
  "llm386-core",
+ "llm386-diff",
  "llm386-packer",
  "llm386-pager",
  "llm386-store-lmdb",
@@ -1216,6 +1217,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "llm386-diff"
+version = "0.1.0"
+dependencies = [
+ "llm386-core",
+ "serde",
+]
+
+[[package]]
 name = "llm386-packer"
 version = "0.1.0"
 dependencies = [
@@ -1239,6 +1248,17 @@ dependencies = [
  "proptest",
  "tempfile",
  "tracing",
+]
+
+[[package]]
+name = "llm386-reduce"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "llm386-core",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

@@ -5,7 +5,8 @@ use pyo3::prelude::*;
 use llm386_core::{
     ChatMessage as RustChatMessage, ChatRole, ContextBlock as RustBlock,
     ModelProfile as RustModelProfile, OmittedBlock as RustOmitted, PagePlan as RustPagePlan,
-    Provenance as RustProvenance, TraceRecord as RustTraceRecord,
+    Provenance as RustProvenance, Selection as RustSelection,
+    SelectionReason as RustSelectionReason, TraceRecord as RustTraceRecord,
 };
 
 #[pyclass(frozen, get_all, skip_from_py_object)]
@@ -112,8 +113,48 @@ impl OmittedBlock {
 
 #[pyclass(frozen, get_all, skip_from_py_object)]
 #[derive(Clone)]
+pub struct Selection {
+    pub block_id: String,
+    pub score: f32,
+    pub reason: String,
+}
+
+#[pymethods]
+impl Selection {
+    fn __repr__(&self) -> String {
+        format!(
+            "Selection(block_id={:?}, score={}, reason={:?})",
+            self.block_id, self.score, self.reason,
+        )
+    }
+}
+
+impl Selection {
+    pub fn from_rust(s: RustSelection) -> Self {
+        Self {
+            block_id: format!("{}", s.block_id),
+            score: s.score,
+            reason: selection_reason_to_str(s.reason).to_string(),
+        }
+    }
+}
+
+fn selection_reason_to_str(r: RustSelectionReason) -> &'static str {
+    match r {
+        RustSelectionReason::Pinned => "pinned",
+        RustSelectionReason::HighRelevance => "high-relevance",
+        RustSelectionReason::Recency => "recency",
+        RustSelectionReason::Dependency => "dependency",
+        RustSelectionReason::GlobalFact => "global-fact",
+        RustSelectionReason::ToolResult => "tool-result",
+    }
+}
+
+#[pyclass(frozen, get_all, skip_from_py_object)]
+#[derive(Clone)]
 pub struct PagePlan {
     pub selected: Vec<String>,
+    pub selections: Vec<Selection>,
     pub omitted: Vec<OmittedBlock>,
     pub estimated_tokens: u32,
 }
@@ -134,6 +175,7 @@ impl PagePlan {
     pub fn from_rust(plan: RustPagePlan) -> Self {
         Self {
             selected: plan.selected.into_iter().map(|id| format!("{id}")).collect(),
+            selections: plan.selections.into_iter().map(Selection::from_rust).collect(),
             omitted: plan.omitted.into_iter().map(OmittedBlock::from_rust).collect(),
             estimated_tokens: plan.estimated_tokens.0,
         }
@@ -227,6 +269,10 @@ pub struct TraceRecord {
     pub prompt_hash: String,
     pub started_at: u64,
     pub duration_ms: u32,
+    pub model_version: String,
+    pub tokenizer_version: String,
+    pub output: Option<String>,
+    pub output_tokens: Option<u32>,
 }
 
 #[pymethods]
@@ -255,6 +301,10 @@ impl TraceRecord {
             prompt_hash: hash_hex,
             started_at: t.started_at.0,
             duration_ms: t.duration_ms,
+            model_version: t.model_version,
+            tokenizer_version: t.tokenizer_version,
+            output: t.output,
+            output_tokens: t.output_tokens.map(|c| c.0),
         }
     }
 }

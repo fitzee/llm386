@@ -153,6 +153,35 @@ pub(crate) enum Command {
         json: bool,
     },
 
+    /// Add a typed directed edge between two blocks.
+    AddEdge {
+        /// Path to the LMDB store.
+        #[arg(long)]
+        store: PathBuf,
+        /// Source block id (decimal, hex with `0x`, or bare 32-char hex).
+        #[arg(long, value_parser = parse_u128)]
+        from: u128,
+        /// Destination block id.
+        #[arg(long, value_parser = parse_u128)]
+        to: u128,
+        /// Edge kind.
+        #[arg(long, value_enum)]
+        kind: EdgeKindArg,
+    },
+
+    /// List edges incident to a block (outgoing by default).
+    Edges {
+        /// Path to the LMDB store.
+        #[arg(long)]
+        store: PathBuf,
+        /// Block id.
+        #[arg(value_parser = parse_u128)]
+        id: u128,
+        /// Show incoming edges instead of outgoing.
+        #[arg(long)]
+        incoming: bool,
+    },
+
     /// Summarize a session's blocks via the configured summarizer.
     Summarize {
         /// Path to the LMDB store.
@@ -194,6 +223,21 @@ pub(crate) enum TraceSub {
         #[arg(value_parser = parse_u128)]
         call_id: u128,
     },
+
+    /// Diff two trace records' page plans. Prints which blocks were
+    /// added, removed, or kept (and which kept-block selection
+    /// reasons changed) plus the input-token delta.
+    Diff {
+        /// Path to the trace store.
+        #[arg(long)]
+        store: PathBuf,
+        /// Older / baseline call id.
+        #[arg(value_parser = parse_u128)]
+        prev: u128,
+        /// Newer call id.
+        #[arg(value_parser = parse_u128)]
+        next: u128,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -202,6 +246,27 @@ pub(crate) enum SummarizerArg {
     Truncating,
     /// Anthropic Claude (requires `ANTHROPIC_API_KEY`).
     Anthropic,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum EdgeKindArg {
+    Parent,
+    DerivedFrom,
+    Supports,
+    Contradicts,
+    ToolInvocation,
+}
+
+impl From<EdgeKindArg> for llm386_core::EdgeKind {
+    fn from(k: EdgeKindArg) -> Self {
+        match k {
+            EdgeKindArg::Parent => Self::Parent,
+            EdgeKindArg::DerivedFrom => Self::DerivedFrom,
+            EdgeKindArg::Supports => Self::Supports,
+            EdgeKindArg::Contradicts => Self::Contradicts,
+            EdgeKindArg::ToolInvocation => Self::ToolInvocation,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

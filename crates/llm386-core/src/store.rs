@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 use crate::block::ContextBlock;
+use crate::edge::Edge;
 use crate::ids::{BlockId, ContentHash, SessionId};
 
 /// Persistent block storage.
@@ -53,6 +54,28 @@ pub trait BlockStore: Send + Sync {
         Err(StoreError::Backend(
             "purge_session not implemented for this BlockStore".into(),
         ))
+    }
+
+    /// Persist a typed [`Edge`] between two blocks. Idempotent: a
+    /// second `put_edge` with the same `(from, to, kind)` triple is a
+    /// no-op. Default impl errors out so stores that haven't yet
+    /// implemented edges fail loudly.
+    fn put_edge(&self, _edge: Edge) -> Result<(), StoreError> {
+        Err(StoreError::Backend(
+            "put_edge not implemented for this BlockStore".into(),
+        ))
+    }
+
+    /// All edges originating at `from`. Empty vec if none. Default
+    /// impl returns empty so legacy stores degrade gracefully.
+    fn edges_from(&self, _from: BlockId) -> Result<Vec<Edge>, StoreError> {
+        Ok(vec![])
+    }
+
+    /// All edges terminating at `to`. Empty vec if none. Default
+    /// impl returns empty so legacy stores degrade gracefully.
+    fn edges_to(&self, _to: BlockId) -> Result<Vec<Edge>, StoreError> {
+        Ok(vec![])
     }
 }
 

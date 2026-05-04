@@ -17,11 +17,45 @@ pub struct PageRequest {
 
 /// The pager's decision: which blocks were selected, which were
 /// omitted, and the aggregate token estimate.
+///
+/// `selected` and `selections` are kept in lockstep — `selected[i]`
+/// is the same block as `selections[i].block_id`. The plain id list
+/// is preserved for backward compatibility; new consumers should
+/// prefer `selections`, which carries the per-block score and the
+/// reason the pager included it.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct PagePlan {
     pub selected: Vec<BlockId>,
+    #[serde(default)]
+    pub selections: Vec<Selection>,
     pub omitted: Vec<OmittedBlock>,
     pub estimated_tokens: TokenCount,
+}
+
+/// One selected block plus the score and reason the pager used.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Selection {
+    pub block_id: BlockId,
+    pub score: f32,
+    pub reason: SelectionReason,
+}
+
+/// Why the pager included a particular block in the working set.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum SelectionReason {
+    /// Listed in `PageRequest::required_blocks`.
+    Pinned,
+    /// Surfaced by a retriever and ranked into a section budget.
+    HighRelevance,
+    /// Selected by recency-based scoring.
+    Recency,
+    /// Pulled in as an ancestor of an already-selected block via
+    /// edge-aware inclusion.
+    Dependency,
+    /// Surfaced by a retriever explicitly tagged as global facts.
+    GlobalFact,
+    /// Tool result paired with an assistant message that called it.
+    ToolResult,
 }
 
 /// A candidate block that the pager considered but did not include.

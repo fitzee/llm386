@@ -9,6 +9,8 @@ members = [
     "crates/llm386-trace",
     "crates/llm386-compress",
     "crates/llm386-compress-anthropic",
+    "crates/llm386-diff",
+    "crates/llm386-reduce",
     "crates/llm386-retrieve-ann",
     "crates/llm386-cli",
 ]
@@ -47,6 +49,8 @@ llm386-packer = { path = "crates/llm386-packer", version = "0.1.0" }
 llm386-trace = { path = "crates/llm386-trace", version = "0.1.0" }
 llm386-compress = { path = "crates/llm386-compress", version = "0.1.0" }
 llm386-compress-anthropic = { path = "crates/llm386-compress-anthropic", version = "0.1.0" }
+llm386-diff = { path = "crates/llm386-diff", version = "0.1.0" }
+llm386-reduce = { path = "crates/llm386-reduce", version = "0.1.0" }
 llm386-retrieve-ann = { path = "crates/llm386-retrieve-ann", version = "0.1.0" }
 
 # Common runtime deps (added per-crate as needed)

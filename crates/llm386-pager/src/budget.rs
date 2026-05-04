@@ -22,11 +22,11 @@
 //! slack_reserved    = variable_budget * fractions[Slack]   (never filled)
 //! ```
 //!
-//! Defaults track the CLAUDE.md "Example section budget" table while
-//! also splitting the State and Retrieved buckets to give Plan and
-//! Background their own slice. If the sum of fractions exceeds 1.0
-//! they are normalized down at allocation time so the per-section
-//! budgets never sum above the variable budget.
+//! Defaults split the variable budget across State, Plan, Recent,
+//! Retrieved, Tools, Background, and a small Slack reserve that is
+//! never filled. If the sum of fractions exceeds 1.0 they are
+//! normalized down at allocation time so the per-section budgets
+//! never sum above the variable budget.
 
 use std::collections::BTreeMap;
 
@@ -39,8 +39,7 @@ pub struct SectionBudgetTable {
 }
 
 impl Default for SectionBudgetTable {
-    /// Default per CLAUDE.md, with Plan and Background carved out of
-    /// State and Retrieved respectively:
+    /// Default split:
     ///
     /// State 0.10, Plan 0.05, Recent 0.20, Retrieved 0.40,
     /// Tools 0.15, Background 0.05, Slack 0.05  (sum 1.00)

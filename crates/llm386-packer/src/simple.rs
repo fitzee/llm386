@@ -369,6 +369,7 @@ mod tests {
         };
         let plan = PagePlan {
             selected: vec![],
+            selections: vec![],
             omitted: vec![],
             estimated_tokens: TokenCount::ZERO,
         };
@@ -402,6 +403,7 @@ mod tests {
         let plan = PagePlan {
             // Deliberately in wrong order — packer must canonicalize.
             selected: vec![plan_id, user_id, sys_id],
+            selections: vec![],
             omitted: vec![],
             estimated_tokens: TokenCount::ZERO,
         };
@@ -435,6 +437,7 @@ mod tests {
         };
         let plan = PagePlan {
             selected: vec![b, a],
+            selections: vec![],
             omitted: vec![],
             estimated_tokens: TokenCount::ZERO,
         };
@@ -462,6 +465,7 @@ mod tests {
         };
         let plan = PagePlan {
             selected: vec![id],
+            selections: vec![],
             omitted: vec![],
             estimated_tokens: TokenCount::ZERO,
         };
@@ -531,6 +535,7 @@ mod tests {
         };
         let plan = PagePlan {
             selected: vec![sys_id, user_id, asst_id],
+            selections: vec![],
             omitted: vec![],
             estimated_tokens: TokenCount::ZERO,
         };
@@ -572,6 +577,7 @@ mod tests {
         };
         let plan = PagePlan {
             selected: vec![sys_id],
+            selections: vec![],
             omitted: vec![],
             estimated_tokens: TokenCount::ZERO,
         };
@@ -602,6 +608,7 @@ mod tests {
         };
         let plan = PagePlan {
             selected: vec![tool_id],
+            selections: vec![],
             omitted: vec![],
             estimated_tokens: TokenCount::ZERO,
         };

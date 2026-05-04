@@ -8,6 +8,11 @@
 .vscode/
 *.swp
 
+# Local Claude config + scratch notes (do not check in)
+.claude/
+CLAUDE.md
+CLAUDE_*.md
+
 # Runtime artifacts (LMDB envs, dev memory dirs)
 /data
 /memory
