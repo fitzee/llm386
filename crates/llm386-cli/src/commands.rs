@@ -6,10 +6,11 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
+use llm386_compress::{NoopSummarizer, TruncatingSummarizer};
 use llm386_core::{
     BlockId, BlockKind, BlockStore, CallId, ContentHash, ContextBlock, ModelProfile, Packer,
-    PageRequest, Pager, Provenance, SessionId, Timestamp, TokenCounts, Tokenizer, TraceRecord,
-    TraceSink, default_registry,
+    PageRequest, Pager, Provenance, SessionId, Summarizer, Timestamp, TokenCounts, Tokenizer,
+    TraceRecord, TraceSink, default_registry,
 };
 use llm386_packer::SimplePacker;
 use llm386_pager::GreedyPager;
@@ -17,7 +18,7 @@ use llm386_store_lmdb::{LmdbStore, StoreConfig};
 use llm386_tokenizer::default_registry as tokenizer_registry;
 use llm386_trace::LmdbTraceSink;
 
-use crate::cli::{Cli, Command, TraceSub};
+use crate::cli::{Cli, Command, SummarizerArg, TraceSub};
 
 pub(crate) fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
@@ -54,6 +55,21 @@ pub(crate) fn dispatch(cli: Cli) -> Result<()> {
             trace.as_deref(),
         ),
         Command::Trace(TraceSub::Show { store, call_id }) => trace_show(&store, CallId(call_id)),
+        Command::Summarize {
+            store,
+            session,
+            summarizer,
+            max_chars,
+            last,
+            store_summary,
+        } => summarize(
+            &store,
+            SessionId(session),
+            summarizer,
+            max_chars,
+            last,
+            store_summary,
+        ),
     }
 }
 
@@ -219,6 +235,69 @@ fn pack(
         eprintln!("---");
         print!("{}", prompt.rendered);
     }
+    Ok(())
+}
+
+fn summarize(
+    store_path: &Path,
+    session: SessionId,
+    summarizer: SummarizerArg,
+    max_chars: usize,
+    last: Option<usize>,
+    store_summary: bool,
+) -> Result<()> {
+    let store = LmdbStore::open(store_path, StoreConfig::default())
+        .with_context(|| format!("opening store at {}", store_path.display()))?;
+
+    let mut ids = store.list_session(session)?;
+    ids.sort(); // BlockId order is chronological.
+    if let Some(n) = last {
+        let from = ids.len().saturating_sub(n);
+        ids.drain(0..from);
+    }
+    let mut blocks: Vec<ContextBlock> = Vec::with_capacity(ids.len());
+    for &id in &ids {
+        if let Some(b) = store.get(id)? {
+            blocks.push(b);
+        }
+    }
+
+    let (summary_text, summarizer_name) = match summarizer {
+        SummarizerArg::Noop => {
+            let s = NoopSummarizer;
+            (s.summarize(&blocks)?, s.name())
+        }
+        SummarizerArg::Truncating => {
+            let s = TruncatingSummarizer::new(max_chars);
+            (s.summarize(&blocks)?, s.name())
+        }
+    };
+
+    print!("{summary_text}");
+
+    if store_summary {
+        let bytes = summary_text.into_bytes();
+        let now = Timestamp(now_ms());
+        let id = new_block_id();
+        let block = ContextBlock {
+            id,
+            kind: BlockKind::Summary,
+            bytes: bytes.clone(),
+            token_counts: TokenCounts::new(),
+            priority: 0.0,
+            created_at: now,
+            updated_at: now,
+            provenance: Provenance {
+                source: Some(format!("summarize:{summarizer_name}")),
+                parents: ids,
+                labels: vec![],
+            },
+            hash: ContentHash::of(&bytes),
+        };
+        let stored = store.put(session, block)?;
+        eprintln!("# summary stored: {stored}");
+    }
+
     Ok(())
 }
 

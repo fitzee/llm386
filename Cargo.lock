@@ -842,6 +842,7 @@ dependencies = [
  "anyhow",
  "clap",
  "getrandom 0.4.2",
+ "llm386-compress",
  "llm386-core",
  "llm386-packer",
  "llm386-pager",
@@ -851,6 +852,14 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "llm386-compress"
+version = "0.1.0"
+dependencies = [
+ "llm386-core",
+ "thiserror",
 ]
 
 [[package]]

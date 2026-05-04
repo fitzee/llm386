@@ -83,6 +83,29 @@ pub(crate) enum Command {
     /// Inspect persisted traces.
     #[command(subcommand)]
     Trace(TraceSub),
+
+    /// Summarize a session's blocks via the configured summarizer.
+    Summarize {
+        /// Path to the LMDB store.
+        #[arg(long)]
+        store: PathBuf,
+        /// Session id (decimal, hex with `0x`, or bare 32-char hex).
+        #[arg(long, value_parser = parse_u128)]
+        session: u128,
+        /// Which summarizer to use.
+        #[arg(long, value_enum, default_value_t = SummarizerArg::Truncating)]
+        summarizer: SummarizerArg,
+        /// For TruncatingSummarizer: max characters per block bullet.
+        #[arg(long, default_value_t = 80)]
+        max_chars: usize,
+        /// Only summarize the most recent N blocks (default: all).
+        #[arg(long)]
+        last: Option<usize>,
+        /// Also persist the summary as a new Summary block whose
+        /// Provenance.parents reference the originals.
+        #[arg(long)]
+        store_summary: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -96,6 +119,12 @@ pub(crate) enum TraceSub {
         #[arg(value_parser = parse_u128)]
         call_id: u128,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum SummarizerArg {
+    Noop,
+    Truncating,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

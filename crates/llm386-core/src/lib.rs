@@ -17,6 +17,7 @@ mod page;
 mod pager;
 mod retriever;
 mod store;
+mod summarizer;
 mod tokenizer;
 mod trace;
 
@@ -30,5 +31,6 @@ pub use page::{OmissionReason, OmittedBlock, PagePlan, PageRequest};
 pub use pager::{Pager, PagerError};
 pub use retriever::{RetrievalCandidate, RetrievalError, Retriever};
 pub use store::{BlockStore, StoreError};
+pub use summarizer::{Summarizer, SummarizerError};
 pub use tokenizer::{Tokenizer, TokenizerError, TokenizerId};
 pub use trace::{TraceError, TraceRecord, TraceSink};

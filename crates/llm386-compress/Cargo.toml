@@ -1,0 +1,16 @@
+[package]
+name = "llm386-compress"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Block summarization and structured reductions for LLM386."
+
+[lints]
+workspace = true
+
+[dependencies]
+llm386-core = { workspace = true }
+thiserror = { workspace = true }
