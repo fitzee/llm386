@@ -361,4 +361,25 @@ mod tests {
         let fetched = store.get(id).unwrap().unwrap();
         assert_eq!(fetched.bytes, b"persist me".to_vec());
     }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config { cases: 24, ..proptest::test_runner::Config::default() })]
+
+        /// Putting the same bytes twice with different proposed ids
+        /// must collapse to a single stored block (content-hash dedup).
+        #[test]
+        fn dedup_invariant_same_bytes_same_id(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..256),
+            seed_a in proptest::prelude::any::<u128>(),
+            seed_b in proptest::prelude::any::<u128>(),
+        ) {
+            let (store, _dir) = open_tmp();
+            let session = SessionId(1);
+            let a = make_block(&bytes, BlockKind::Fact, 0, seed_a);
+            let b = make_block(&bytes, BlockKind::Fact, 0, seed_b);
+            let id_a = store.put(session, a).unwrap();
+            let id_b = store.put(session, b).unwrap();
+            proptest::prop_assert_eq!(id_a, id_b);
+        }
+    }
 }

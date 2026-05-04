@@ -402,4 +402,41 @@ mod tests {
         assert_eq!(plan.omitted.len(), 1);
         assert_eq!(plan.omitted[0].block_id, id);
     }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config { cases: 12, ..proptest::test_runner::Config::default() })]
+
+        /// The plan's `estimated_tokens` must never exceed the model's
+        /// `input_budget`, regardless of how many blocks the session
+        /// holds or how tight the budget is.
+        #[test]
+        fn pager_never_exceeds_budget(
+            n_blocks in 0u64..25,
+            budget in 50u32..2_000,
+        ) {
+            let (store, _dir, tok) = setup();
+            let session = SessionId(1);
+            for i in 0..n_blocks {
+                let bytes = format!("p{i} content padding");
+                store
+                    .put(session, block(bytes.as_bytes(), BlockKind::UserMessage, i, u128::from(i)))
+                    .unwrap();
+            }
+            let pager = GreedyPager::new(store, tok);
+            let plan = pager
+                .page(PageRequest {
+                    session_id: session,
+                    task: String::new(),
+                    model: profile(budget, 0),
+                    required_blocks: vec![],
+                })
+                .unwrap();
+            proptest::prop_assert!(
+                plan.estimated_tokens.0 <= budget,
+                "estimated_tokens={} > budget={}",
+                plan.estimated_tokens.0,
+                budget,
+            );
+        }
+    }
 }

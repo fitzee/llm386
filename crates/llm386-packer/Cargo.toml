@@ -20,3 +20,4 @@ llm386-pager = { workspace = true }
 llm386-store-lmdb = { workspace = true }
 llm386-tokenizer = { workspace = true }
 tempfile = { workspace = true }
+proptest = { workspace = true }

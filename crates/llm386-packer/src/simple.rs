@@ -362,4 +362,76 @@ mod tests {
         assert!(prompt.rendered.contains("summarize the conversation"));
         assert!(prompt.input_tokens.0 <= request.model.input_budget().0);
     }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config { cases: 12, ..proptest::test_runner::Config::default() })]
+
+        /// Pack must be byte-deterministic across two calls with the
+        /// same store state, request, and plan — this is the property
+        /// the trace layer relies on for replay.
+        #[test]
+        fn pack_is_byte_deterministic(
+            n_blocks in 0u64..10,
+            task_seed in 0u32..100,
+        ) {
+            use llm386_pager::GreedyPager;
+            let (store, _dir, tok) = setup();
+            let session = SessionId(1);
+            for i in 0..n_blocks {
+                let bytes = format!("p{task_seed}/{i} content");
+                store
+                    .put(session, make_block(bytes.as_bytes(), BlockKind::Fact, i, u128::from(i)))
+                    .unwrap();
+            }
+            let pager = GreedyPager::new(store.clone(), tok.clone());
+            let packer = SimplePacker::new(store, tok);
+            let request = PageRequest {
+                session_id: session,
+                task: format!("task {task_seed}"),
+                model: profile(10_000),
+                required_blocks: vec![],
+            };
+            let plan = pager.page(request.clone()).unwrap();
+            let a = packer.pack(&request, &plan).unwrap();
+            let b = packer.pack(&request, &plan).unwrap();
+            proptest::prop_assert_eq!(a.rendered, b.rendered);
+            proptest::prop_assert_eq!(a.input_tokens, b.input_tokens);
+        }
+
+        /// If pack succeeds, its rendered prompt must fit within the
+        /// model's input budget. (Covers the BudgetExceeded short-
+        /// circuit and the surrounding accounting.)
+        #[test]
+        fn successful_pack_fits_budget(
+            n_blocks in 0u64..10,
+            budget in 80u32..2_000,
+        ) {
+            use llm386_pager::GreedyPager;
+            let (store, _dir, tok) = setup();
+            let session = SessionId(1);
+            for i in 0..n_blocks {
+                let bytes = format!("block {i} content");
+                store
+                    .put(session, make_block(bytes.as_bytes(), BlockKind::Fact, i, u128::from(i)))
+                    .unwrap();
+            }
+            let pager = GreedyPager::new(store.clone(), tok.clone());
+            let packer = SimplePacker::new(store, tok);
+            let request = PageRequest {
+                session_id: session,
+                task: "task".into(),
+                model: profile(budget),
+                required_blocks: vec![],
+            };
+            let plan = pager.page(request.clone()).unwrap();
+            if let Ok(prompt) = packer.pack(&request, &plan) {
+                proptest::prop_assert!(
+                    prompt.input_tokens.0 <= budget,
+                    "input_tokens={} > budget={}",
+                    prompt.input_tokens.0,
+                    budget,
+                );
+            }
+        }
+    }
 }
