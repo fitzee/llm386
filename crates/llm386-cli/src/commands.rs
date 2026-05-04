@@ -131,6 +131,7 @@ pub(crate) fn dispatch(command: Command, config: &LoadedConfig) -> Result<()> {
             config,
         ),
         Command::Trace(TraceSub::Show { store, call_id }) => trace_show(&store, CallId(call_id)),
+        Command::ListSessions { store } => list_sessions(&store),
         Command::Show { store, id } => show(&store, BlockId(id)),
         Command::Summarize {
             store,
@@ -400,6 +401,16 @@ fn summarize(args: &SummarizeArgs<'_>) -> Result<()> {
         eprintln!("# summary stored: {stored}");
     }
 
+    Ok(())
+}
+
+fn list_sessions(store_path: &Path) -> Result<()> {
+    let store = LmdbStore::open(store_path, StoreConfig::default())
+        .with_context(|| format!("opening store at {}", store_path.display()))?;
+    let sessions = store.list_sessions()?;
+    for s in sessions {
+        println!("{s}");
+    }
     Ok(())
 }
 

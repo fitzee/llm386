@@ -201,6 +201,30 @@ impl BlockStore for LmdbStore {
         Ok(ids)
     }
 
+    fn list_sessions(&self) -> Result<Vec<SessionId>, StoreError> {
+        // The blocks_by_session table is keyed by `(session, block)`
+        // (32 bytes total). Walk all keys and collect the unique
+        // 16-byte session prefixes.
+        use std::collections::BTreeSet;
+        let rtxn = self.env.read_txn().map_err(|e| heed_err(&e))?;
+        let iter = self
+            .blocks_by_session
+            .iter(&rtxn)
+            .map_err(|e| heed_err(&e))?;
+        let mut seen: BTreeSet<u128> = BTreeSet::new();
+        for entry in iter {
+            let (key, _) = entry.map_err(|e| heed_err(&e))?;
+            if key.len() < 16 {
+                continue;
+            }
+            let arr: [u8; 16] = key[..16]
+                .try_into()
+                .map_err(|_| StoreError::Backend("session key prefix".into()))?;
+            seen.insert(u128::from_be_bytes(arr));
+        }
+        Ok(seen.into_iter().map(SessionId).collect())
+    }
+
     fn lookup_hash(&self, hash: ContentHash) -> Result<Option<BlockId>, StoreError> {
         let rtxn = self.env.read_txn().map_err(|e| heed_err(&e))?;
         match self
@@ -310,6 +334,34 @@ mod tests {
         let mut expected = vec![id_a, id_b, id_c];
         expected.sort();
         assert_eq!(listed, expected);
+    }
+
+    #[test]
+    fn list_sessions_returns_unique_sorted_ids() {
+        let (store, _dir) = open_tmp();
+        let s_a = SessionId(7);
+        let s_b = SessionId(3);
+        let s_c = SessionId(11);
+        store
+            .put(s_a, make_block(b"x", BlockKind::Fact, 1, 1))
+            .unwrap();
+        store
+            .put(s_a, make_block(b"y", BlockKind::Fact, 2, 2))
+            .unwrap();
+        store
+            .put(s_b, make_block(b"z", BlockKind::Fact, 3, 3))
+            .unwrap();
+        store
+            .put(s_c, make_block(b"w", BlockKind::Fact, 4, 4))
+            .unwrap();
+        let sessions = store.list_sessions().unwrap();
+        assert_eq!(sessions, vec![SessionId(3), SessionId(7), SessionId(11)]);
+    }
+
+    #[test]
+    fn list_sessions_empty_when_no_blocks() {
+        let (store, _dir) = open_tmp();
+        assert!(store.list_sessions().unwrap().is_empty());
     }
 
     #[test]

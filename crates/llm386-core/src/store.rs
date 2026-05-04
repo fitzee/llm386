@@ -23,6 +23,13 @@ pub trait BlockStore: Send + Sync {
     /// All block ids belonging to a session.
     fn list_session(&self, session: SessionId) -> Result<Vec<BlockId>, StoreError>;
 
+    /// Every distinct session id that has at least one block in the
+    /// store, sorted ascending. Default impl returns an empty vec —
+    /// stores that can't enumerate sessions cheaply may leave it.
+    fn list_sessions(&self) -> Result<Vec<SessionId>, StoreError> {
+        Ok(vec![])
+    }
+
     /// Look up a block id by its content hash.
     fn lookup_hash(&self, hash: ContentHash) -> Result<Option<BlockId>, StoreError>;
 }

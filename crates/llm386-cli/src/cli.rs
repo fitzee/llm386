@@ -91,6 +91,13 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Trace(TraceSub),
 
+    /// List every session id with at least one block in the store.
+    ListSessions {
+        /// Path to the LMDB store.
+        #[arg(long)]
+        store: PathBuf,
+    },
+
     /// Print the full contents of a single block by id.
     Show {
         /// Path to the LMDB store.
