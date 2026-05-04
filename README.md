@@ -259,4 +259,4 @@ Early. The single-node embedded library and CLI work end to end against real LMD
 
 ## License
 
-MIT or Apache-2.0, at your option.
+Apache-2.0.
