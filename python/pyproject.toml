@@ -30,7 +30,7 @@ dependencies = []
 test = ["pytest>=7"]
 
 [project.urls]
-Repository = "https://github.com/mattfitzgerald/llm386"
+Repository = "https://github.com/fitzee/llm386"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]

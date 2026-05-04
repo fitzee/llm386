@@ -19,7 +19,7 @@ edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 authors = ["Matt Fitzgerald <matt.fitzgerald@gmail.com>"]
-repository = "https://github.com/mattfitzgerald/llm386"
+repository = "https://github.com/fitzee/llm386"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
