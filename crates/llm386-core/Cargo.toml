@@ -12,3 +12,6 @@ description = "Core domain types and traits for LLM386."
 workspace = true
 
 [dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+blake3 = { workspace = true }
