@@ -1,0 +1,31 @@
+# llm386-chat-loop.toml
+#
+# Profile: long-running chat agent.
+# Optimized for multi-turn conversations where recent context matters,
+# the model needs persistent state across turns, and tool results
+# come and go.
+#
+# Strategy: balanced split that gives Recent the largest single share
+# (so chat history flows naturally), with State and Plan reserved for
+# anything the reducer has committed as durable agent state.
+#
+# Effective behavior on a 100K input budget: ~10K State, ~5K Plan,
+# ~30K Recent, ~30K Retrieved, ~15K Tools, ~5K Background, ~5K Slack.
+
+[section_budgets]
+state      = 0.10
+plan       = 0.05
+recent     = 0.30
+retrieved  = 0.30
+tools      = 0.15
+background = 0.05
+slack      = 0.05
+
+# Recency-heavy retrieval. BM25 surfaces older relevant turns;
+# RecencyRetriever weighs the last hour of conversation.
+[[retriever]]
+kind = "recency"
+half_life_secs = 3600.0   # 1 hour
+
+[[retriever]]
+kind = "bm25"

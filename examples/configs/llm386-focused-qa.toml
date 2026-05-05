@@ -1,0 +1,34 @@
+# llm386-focused-qa.toml
+#
+# Profile: focused single-fact Q&A.
+# Optimized for short, high-signal prompts where the model's job is to
+# answer a specific question, not to do broad reasoning.
+#
+# Strategy: heavy weight on Retrieved (the relevant facts), tiny Recent
+# (one or two prior turns is enough), generous Slack to hard-cap how
+# much of the input budget gets used.
+#
+# Effective behavior on a 100K input budget: ~50K Retrieved, ~5K
+# Recent, ~30K Slack (unused). That's a hard 70K ceiling, regardless
+# of how much retrievable history exists in the store.
+
+[section_budgets]
+state      = 0.05
+plan       = 0.00   # focused tasks rarely need a stored plan
+recent     = 0.05   # last user message + maybe one prior turn
+retrieved  = 0.50   # the section that does the work
+tools      = 0.10
+background = 0.00   # no low-priority context
+slack      = 0.30   # 30% reserved headroom, never filled
+
+# Tight retriever stack so each retriever returns at most a small
+# number of high-confidence candidates. BM25 for keyword precision,
+# recency as a low-weight tiebreaker.
+[[retriever]]
+kind = "bm25"
+k1 = 1.5
+b = 0.75
+
+[[retriever]]
+kind = "recency"
+half_life_secs = 120.0

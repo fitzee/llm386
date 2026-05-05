@@ -1,0 +1,40 @@
+# llm386-rag-heavy.toml
+#
+# Profile: RAG-style Q&A over a document corpus.
+# Optimized for queries that need broad document context and minimal
+# conversational history.
+#
+# Strategy: most of the budget goes to Retrieved (where the document
+# chunks live), Background gets a meaningful slice (low-priority
+# context that supports the retrieval but isn't directly relevant to
+# the query), Recent and Tools are tiny.
+#
+# Effective behavior on a 100K input budget: ~5K State, ~10K Recent,
+# ~60K Retrieved, ~5K Tools, ~15K Background, ~5K Slack.
+# The Recent fraction stays modest so chat-history bloat doesn't crowd
+# out document hits.
+
+[section_budgets]
+state      = 0.05
+plan       = 0.00
+recent     = 0.10
+retrieved  = 0.60
+tools      = 0.05
+background = 0.15
+slack      = 0.05
+
+# Embedding ANN as the primary retriever, with BM25 to catch
+# rare-term lookups (codes, identifiers, error messages) that
+# semantic search tends to miss.
+[[retriever]]
+kind = "bm25"
+
+[[retriever]]
+kind = "recency"
+half_life_secs = 7200.0   # 2 hours; chat history matters less in RAG mode
+
+# Note: an ANN retriever is wired in code rather than TOML at the
+# moment because it needs an Embedder dependency. Add it via:
+#   pager.add_retriever(Arc::new(HnswAnnRetriever::new(...)))
+# or, in Python, register it as a custom retriever via
+# add_python_retriever().

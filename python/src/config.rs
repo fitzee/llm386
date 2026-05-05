@@ -7,8 +7,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use llm386_core::{ModelProfile, ModelRegistry, Retriever, TokenizerId};
-use llm386_pager::{Bm25Retriever, LexicalRetriever, RecencyRetriever, SessionRetriever};
+use llm386_core::{ModelProfile, ModelRegistry, Retriever, SectionKind, TokenizerId};
+use llm386_pager::{
+    Bm25Retriever, LexicalRetriever, RecencyRetriever, SectionBudgetTable, SessionRetriever,
+};
 use llm386_store_lmdb::LmdbStore;
 use llm386_tokenizer::{HfTokenizer, TokenizerRegistry};
 use serde::Deserialize;
@@ -21,6 +23,54 @@ pub(crate) struct ConfigFile {
     pub hf_tokenizer: Vec<HfTokenizerEntry>,
     #[serde(default)]
     pub retriever: Vec<RetrieverEntry>,
+    #[serde(default)]
+    pub section_budgets: Option<SectionBudgetEntry>,
+}
+
+#[derive(Default, Deserialize)]
+pub(crate) struct SectionBudgetEntry {
+    #[serde(default)]
+    state: Option<f32>,
+    #[serde(default)]
+    plan: Option<f32>,
+    #[serde(default)]
+    recent: Option<f32>,
+    #[serde(default)]
+    retrieved: Option<f32>,
+    #[serde(default)]
+    tools: Option<f32>,
+    #[serde(default)]
+    background: Option<f32>,
+    #[serde(default)]
+    slack: Option<f32>,
+}
+
+impl SectionBudgetEntry {
+    pub(crate) fn build(self) -> SectionBudgetTable {
+        let mut table = SectionBudgetTable::empty();
+        if let Some(v) = self.state {
+            table.set(SectionKind::State, v);
+        }
+        if let Some(v) = self.plan {
+            table.set(SectionKind::Plan, v);
+        }
+        if let Some(v) = self.recent {
+            table.set(SectionKind::Recent, v);
+        }
+        if let Some(v) = self.retrieved {
+            table.set(SectionKind::Retrieved, v);
+        }
+        if let Some(v) = self.tools {
+            table.set(SectionKind::Tools, v);
+        }
+        if let Some(v) = self.background {
+            table.set(SectionKind::Background, v);
+        }
+        if let Some(v) = self.slack {
+            table.set(SectionKind::Slack, v);
+        }
+        table
+    }
 }
 
 #[derive(Deserialize)]
@@ -50,15 +100,21 @@ pub(crate) fn parse(path: &Path) -> Result<ConfigFile, String> {
     toml::from_str(&s).map_err(|e| format!("parsing config file at {}: {e}", path.display()))
 }
 
+pub(crate) struct Applied {
+    pub retrievers: Vec<RetrieverEntry>,
+    pub section_budgets: Option<SectionBudgetTable>,
+}
+
 /// Apply parsed [[profile]] and [[hf_tokenizer]] entries to the
 /// given registries, mutating in place. Returns the parsed
-/// retriever entries (the caller materializes those per-call,
-/// since they bind to a specific store).
+/// retriever entries (the caller materializes those per-call, since
+/// they bind to a specific store) and the optional
+/// [section_budgets] table.
 pub(crate) fn apply(
     parsed: ConfigFile,
     models: &mut ModelRegistry,
     tokenizers: &mut TokenizerRegistry,
-) -> Result<Vec<RetrieverEntry>, String> {
+) -> Result<Applied, String> {
     for profile in parsed.profile {
         models.register(profile);
     }
@@ -74,7 +130,10 @@ pub(crate) fn apply(
         )?;
         tokenizers.register(Arc::new(tok));
     }
-    Ok(parsed.retriever)
+    Ok(Applied {
+        retrievers: parsed.retriever,
+        section_budgets: parsed.section_budgets.map(SectionBudgetEntry::build),
+    })
 }
 
 /// Materialize a Vec<Arc<dyn Retriever>> from the parsed entries,

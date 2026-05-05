@@ -35,6 +35,7 @@ pub(crate) struct LoadedConfig {
     pub models: ModelRegistry,
     pub tokenizers: TokenizerRegistry,
     pub retriever_entries: Vec<RetrieverEntry>,
+    pub section_budgets: Option<llm386_pager::SectionBudgetTable>,
 }
 
 /// Load the built-in registries, then merge in any user-supplied
@@ -45,6 +46,7 @@ pub(crate) fn load_config(flag_path: Option<&Path>) -> Result<LoadedConfig> {
     let mut models = default_registry();
     let mut tokenizers = tokenizer_registry().context("initializing default tokenizer registry")?;
     let mut retriever_entries: Vec<RetrieverEntry> = Vec::new();
+    let mut section_budgets: Option<llm386_pager::SectionBudgetTable> = None;
 
     let path = flag_path
         .map(Path::to_path_buf)
@@ -69,12 +71,14 @@ pub(crate) fn load_config(flag_path: Option<&Path>) -> Result<LoadedConfig> {
             tokenizers.register(Arc::new(tok));
         }
         retriever_entries = parsed.retrievers;
+        section_budgets = parsed.section_budgets;
     }
 
     Ok(LoadedConfig {
         models,
         tokenizers,
         retriever_entries,
+        section_budgets,
     })
 }
 
@@ -83,6 +87,7 @@ struct ParsedConfig {
     profiles: Vec<ModelProfile>,
     hf_tokenizers: Vec<HfTokenizerEntry>,
     retrievers: Vec<RetrieverEntry>,
+    section_budgets: Option<llm386_pager::SectionBudgetTable>,
 }
 
 #[derive(Deserialize)]
@@ -93,6 +98,58 @@ struct ConfigFile {
     hf_tokenizer: Vec<HfTokenizerEntry>,
     #[serde(default)]
     retriever: Vec<RetrieverEntry>,
+    #[serde(default)]
+    section_budgets: Option<SectionBudgetEntry>,
+}
+
+/// `[section_budgets]` table — fractions of the variable budget per
+/// section. Any field omitted defaults to 0.0 and that section gets no
+/// allocation. Sums above 1.0 are normalized down at allocation time.
+#[derive(Default, Deserialize)]
+struct SectionBudgetEntry {
+    #[serde(default)]
+    state: Option<f32>,
+    #[serde(default)]
+    plan: Option<f32>,
+    #[serde(default)]
+    recent: Option<f32>,
+    #[serde(default)]
+    retrieved: Option<f32>,
+    #[serde(default)]
+    tools: Option<f32>,
+    #[serde(default)]
+    background: Option<f32>,
+    #[serde(default)]
+    slack: Option<f32>,
+}
+
+impl SectionBudgetEntry {
+    fn build(self) -> llm386_pager::SectionBudgetTable {
+        use llm386_core::SectionKind;
+        let mut table = llm386_pager::SectionBudgetTable::empty();
+        if let Some(v) = self.state {
+            table.set(SectionKind::State, v);
+        }
+        if let Some(v) = self.plan {
+            table.set(SectionKind::Plan, v);
+        }
+        if let Some(v) = self.recent {
+            table.set(SectionKind::Recent, v);
+        }
+        if let Some(v) = self.retrieved {
+            table.set(SectionKind::Retrieved, v);
+        }
+        if let Some(v) = self.tools {
+            table.set(SectionKind::Tools, v);
+        }
+        if let Some(v) = self.background {
+            table.set(SectionKind::Background, v);
+        }
+        if let Some(v) = self.slack {
+            table.set(SectionKind::Slack, v);
+        }
+        table
+    }
 }
 
 #[derive(Deserialize)]
@@ -128,6 +185,7 @@ fn parse_config_toml(s: &str) -> Result<ParsedConfig> {
         profiles: parsed.profile,
         hf_tokenizers: parsed.hf_tokenizer,
         retrievers: parsed.retriever,
+        section_budgets: parsed.section_budgets.map(SectionBudgetEntry::build),
     })
 }
 
@@ -352,6 +410,9 @@ fn page(
     if let Some(retrievers) = build_retrievers(&config.retriever_entries, &store)? {
         pager = pager.with_retrievers(retrievers);
     }
+    if let Some(budgets) = &config.section_budgets {
+        pager = pager.with_budgets(budgets.clone());
+    }
     let plan = pager.page(PageRequest {
         session_id: session,
         task: task.to_string(),
@@ -394,6 +455,9 @@ fn pack(
     let mut pager = GreedyPager::new(store.clone(), tokenizer.clone());
     if let Some(retrievers) = build_retrievers(&config.retriever_entries, &store)? {
         pager = pager.with_retrievers(retrievers);
+    }
+    if let Some(budgets) = &config.section_budgets {
+        pager = pager.with_budgets(budgets.clone());
     }
     let packer = SimplePacker::new(store, tokenizer);
 

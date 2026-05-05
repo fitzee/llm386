@@ -38,6 +38,7 @@ pub struct Store {
     tokenizers: TokenizerRegistry,
     models: ModelRegistry,
     retriever_entries: Vec<config::RetrieverEntry>,
+    section_budgets: Option<llm386_pager::SectionBudgetTable>,
     python_retrievers: RwLock<Vec<Arc<dyn Retriever>>>,
 }
 
@@ -60,18 +61,20 @@ impl Store {
         let mut tokenizers = default_tokenizers()
             .map_err(|e| LLM386Error::new_err(format!("init tokenizers: {e}")))?;
         let mut models = default_registry();
-        let retriever_entries = if let Some(cfg_path) = profiles {
+        let (retriever_entries, section_budgets) = if let Some(cfg_path) = profiles {
             let parsed = config::parse(&cfg_path).map_err(LLM386Error::new_err)?;
-            config::apply(parsed, &mut models, &mut tokenizers)
-                .map_err(LLM386Error::new_err)?
+            let applied = config::apply(parsed, &mut models, &mut tokenizers)
+                .map_err(LLM386Error::new_err)?;
+            (applied.retrievers, applied.section_budgets)
         } else {
-            Vec::new()
+            (Vec::new(), None)
         };
         Ok(Self {
             inner,
             tokenizers,
             models,
             retriever_entries,
+            section_budgets,
             python_retrievers: RwLock::new(Vec::new()),
         })
     }
@@ -224,6 +227,9 @@ impl Store {
         if !retrievers.is_empty() {
             pager = pager.with_retrievers(retrievers);
         }
+        if let Some(budgets) = &self.section_budgets {
+            pager = pager.with_budgets(budgets.clone());
+        }
         let request = PageRequest {
             session_id: SessionId(session),
             task: task.to_string(),
@@ -253,6 +259,9 @@ impl Store {
         retrievers.extend(self.python_retrievers.read().iter().cloned());
         if !retrievers.is_empty() {
             pager = pager.with_retrievers(retrievers);
+        }
+        if let Some(budgets) = &self.section_budgets {
+            pager = pager.with_budgets(budgets.clone());
         }
         let packer = SimplePacker::new(self.inner.clone(), tokenizer);
         let request = PageRequest {

@@ -194,7 +194,7 @@ ANTHROPIC_API_KEY=... llm386 summarize --store ./store --session 1 --summarizer 
 
 ### Custom config
 
-A TOML file (passed via `--profiles <path>` or the `LLM386_PROFILES` environment variable) carries three optional sections:
+A TOML file (passed via `--profiles <path>` or the `LLM386_PROFILES` environment variable) carries four optional sections:
 
 ```toml
 [[profile]]
@@ -214,9 +214,18 @@ k1 = 1.5
 [[retriever]]
 kind = "recency"
 half_life_secs = 60.0
+
+[section_budgets]
+state      = 0.10
+plan       = 0.05
+recent     = 0.20
+retrieved  = 0.40
+tools      = 0.15
+background = 0.05
+slack      = 0.05
 ```
 
-`[[profile]]` adds model profiles on top of the built-ins. `[[hf_tokenizer]]` registers a HuggingFace tokenizer.json (used by Llama, Qwen, Mistral, and similar). `[[retriever]]` replaces the default retriever stack.
+`[[profile]]` adds model profiles on top of the built-ins. `[[hf_tokenizer]]` registers a HuggingFace tokenizer.json (used by Llama, Qwen, Mistral, and similar). `[[retriever]]` replaces the default retriever stack. `[section_budgets]` overrides the per-section fractions of the variable budget — fractions sum to ≤ 1.0, anything routed to `slack` is reserved headroom that is never filled. See [`examples/configs/`](./examples/configs/) for three worked profiles (focused Q&A, chat loop, RAG-heavy).
 
 ### Library
 
