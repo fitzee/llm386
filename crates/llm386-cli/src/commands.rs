@@ -36,6 +36,7 @@ pub(crate) struct LoadedConfig {
     pub tokenizers: TokenizerRegistry,
     pub retriever_entries: Vec<RetrieverEntry>,
     pub section_budgets: Option<llm386_pager::SectionBudgetTable>,
+    pub packer_options: llm386_packer::PackerOptions,
 }
 
 /// Load the built-in registries, then merge in any user-supplied
@@ -47,6 +48,7 @@ pub(crate) fn load_config(flag_path: Option<&Path>) -> Result<LoadedConfig> {
     let mut tokenizers = tokenizer_registry().context("initializing default tokenizer registry")?;
     let mut retriever_entries: Vec<RetrieverEntry> = Vec::new();
     let mut section_budgets: Option<llm386_pager::SectionBudgetTable> = None;
+    let mut packer_options = llm386_packer::PackerOptions::default();
 
     let path = flag_path
         .map(Path::to_path_buf)
@@ -72,6 +74,9 @@ pub(crate) fn load_config(flag_path: Option<&Path>) -> Result<LoadedConfig> {
         }
         retriever_entries = parsed.retrievers;
         section_budgets = parsed.section_budgets;
+        if let Some(p) = parsed.packer {
+            packer_options = p;
+        }
     }
 
     Ok(LoadedConfig {
@@ -79,6 +84,7 @@ pub(crate) fn load_config(flag_path: Option<&Path>) -> Result<LoadedConfig> {
         tokenizers,
         retriever_entries,
         section_budgets,
+        packer_options,
     })
 }
 
@@ -88,6 +94,7 @@ struct ParsedConfig {
     hf_tokenizers: Vec<HfTokenizerEntry>,
     retrievers: Vec<RetrieverEntry>,
     section_budgets: Option<llm386_pager::SectionBudgetTable>,
+    packer: Option<llm386_packer::PackerOptions>,
 }
 
 #[derive(Deserialize)]
@@ -100,6 +107,28 @@ struct ConfigFile {
     retriever: Vec<RetrieverEntry>,
     #[serde(default)]
     section_budgets: Option<SectionBudgetEntry>,
+    #[serde(default)]
+    packer: Option<PackerEntry>,
+}
+
+/// `[packer]` table — opt-in packer behavior knobs. Mirrors
+/// [`llm386_packer::PackerOptions`].
+#[derive(Default, Deserialize)]
+struct PackerEntry {
+    /// When `true`, prepend each rendered block with its `created_at`
+    /// timestamp in ISO 8601 UTC, and emit a `Current time:` anchor
+    /// at the start of the Task section.
+    #[serde(default)]
+    include_timestamps: bool,
+}
+
+impl PackerEntry {
+    fn build(self) -> llm386_packer::PackerOptions {
+        llm386_packer::PackerOptions {
+            include_timestamps: self.include_timestamps,
+            now_ms: None,
+        }
+    }
 }
 
 /// `[section_budgets]` table — fractions of the variable budget per
@@ -186,6 +215,7 @@ fn parse_config_toml(s: &str) -> Result<ParsedConfig> {
         hf_tokenizers: parsed.hf_tokenizer,
         retrievers: parsed.retriever,
         section_budgets: parsed.section_budgets.map(SectionBudgetEntry::build),
+        packer: parsed.packer.map(PackerEntry::build),
     })
 }
 
@@ -273,6 +303,7 @@ pub(crate) fn dispatch(command: Command, config: &LoadedConfig) -> Result<()> {
             task,
             prompt_only,
             chat,
+            timestamps,
             trace,
         } => pack(
             &store,
@@ -281,6 +312,7 @@ pub(crate) fn dispatch(command: Command, config: &LoadedConfig) -> Result<()> {
             &task,
             prompt_only,
             chat,
+            timestamps,
             trace.as_deref(),
             config,
         ),
@@ -441,6 +473,7 @@ fn page(
 }
 
 #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)] // CLI flags map 1:1 to handler args; refactoring to a struct buys nothing here.
+#[allow(clippy::too_many_arguments)] // CLI wiring; bundling these would obscure the dispatch
 fn pack(
     store_path: &Path,
     session: SessionId,
@@ -448,6 +481,7 @@ fn pack(
     task: &str,
     prompt_only: bool,
     chat: bool,
+    timestamps_flag: bool,
     trace_path: Option<&Path>,
     config: &LoadedConfig,
 ) -> Result<()> {
@@ -459,7 +493,11 @@ fn pack(
     if let Some(budgets) = &config.section_budgets {
         pager = pager.with_budgets(budgets.clone());
     }
-    let packer = SimplePacker::new(store, tokenizer);
+    let mut packer_options = config.packer_options.clone();
+    if timestamps_flag {
+        packer_options.include_timestamps = true;
+    }
+    let packer = SimplePacker::new(store, tokenizer).with_options(packer_options);
 
     let request = PageRequest {
         session_id: session,

@@ -11,3 +11,9 @@ kind = "bm25"
 [[retriever]]
 kind = "recency"
 half_life_secs = 600.0
+
+# Surface block timestamps to the model so it can answer "when did we
+# discuss X?" rather than only "what did we discuss?". The agent.py
+# demo also passes timestamps=True per call; either path is enough.
+[packer]
+include_timestamps = true

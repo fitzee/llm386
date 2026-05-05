@@ -183,7 +183,14 @@ def turn(store: Store, session_id: int, user_input: str, agent: Any) -> str:
     #    what actually gets sent to the model.
     plan = store.page(session=session_id, model=MODEL_NAME, task=user_input)
     packed = store.pack(
-        session=session_id, model=MODEL_NAME, task=user_input, chat=True
+        session=session_id,
+        model=MODEL_NAME,
+        task=user_input,
+        chat=True,
+        # Prepend each block with its ISO 8601 UTC timestamp and add a
+        # "Current time" anchor so the model can answer "when did we
+        # discuss X?" instead of just "what did we discuss?".
+        timestamps=True,
     )
     initial = to_langchain_messages(packed.messages)
 

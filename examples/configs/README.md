@@ -50,6 +50,29 @@ slack      = 0.05   # reserved headroom — never filled
 
 `System` and `Task` are fixed and don't appear in this table — they always pack against the global budget directly.
 
+## `[packer]` — opt-in temporal context
+
+By default the packer renders block bodies as stored. With `include_timestamps = true`, every rendered block gets prefixed with its ISO 8601 UTC creation time, and the Task section gains a `Current time:` line. This lets the model answer "when did we discuss X?" instead of only "what did we discuss?".
+
+```toml
+[packer]
+include_timestamps = true
+```
+
+Cost: roughly 12 tokens per packed block. Worth it for chat agents (where temporal context shapes responses), usually not worth it for RAG over static documents (where ingest timestamps don't carry meaning).
+
+The `chat-loop` config has timestamps on; `focused-qa` and `rag-heavy` leave them off. You can also opt in per-call:
+
+```python
+result = store.pack(session=1, model="gpt-4o", task="...", chat=True, timestamps=True)
+```
+
+```
+llm386 pack --store ./store --session 1 --model gpt-4o --task "..." --timestamps
+```
+
+The per-call flag overrides whatever's set in the config file.
+
 ## Combined with retrievers
 
 Section budgets define *how much* of each section's content gets in. Retrievers define *what* content is even a candidate. The two compose:

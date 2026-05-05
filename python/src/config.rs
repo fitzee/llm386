@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use llm386_core::{ModelProfile, ModelRegistry, Retriever, SectionKind, TokenizerId};
+use llm386_packer::PackerOptions;
 use llm386_pager::{
     Bm25Retriever, LexicalRetriever, RecencyRetriever, SectionBudgetTable, SessionRetriever,
 };
@@ -25,6 +26,23 @@ pub(crate) struct ConfigFile {
     pub retriever: Vec<RetrieverEntry>,
     #[serde(default)]
     pub section_budgets: Option<SectionBudgetEntry>,
+    #[serde(default)]
+    pub packer: Option<PackerEntry>,
+}
+
+#[derive(Default, Deserialize)]
+pub(crate) struct PackerEntry {
+    #[serde(default)]
+    include_timestamps: bool,
+}
+
+impl PackerEntry {
+    pub(crate) fn build(self) -> PackerOptions {
+        PackerOptions {
+            include_timestamps: self.include_timestamps,
+            now_ms: None,
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -103,6 +121,7 @@ pub(crate) fn parse(path: &Path) -> Result<ConfigFile, String> {
 pub(crate) struct Applied {
     pub retrievers: Vec<RetrieverEntry>,
     pub section_budgets: Option<SectionBudgetTable>,
+    pub packer_options: Option<PackerOptions>,
 }
 
 /// Apply parsed [[profile]] and [[hf_tokenizer]] entries to the
@@ -133,6 +152,7 @@ pub(crate) fn apply(
     Ok(Applied {
         retrievers: parsed.retriever,
         section_budgets: parsed.section_budgets.map(SectionBudgetEntry::build),
+        packer_options: parsed.packer.map(PackerEntry::build),
     })
 }
 

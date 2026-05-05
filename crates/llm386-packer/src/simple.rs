@@ -8,11 +8,15 @@
 //!
 //! Determinism: within each section, blocks render in `BlockId`
 //! order (chronological). Identical inputs always produce a
-//! byte-identical `rendered` string.
+//! byte-identical `rendered` string. With timestamps enabled
+//! (`PackerOptions::include_timestamps`), the "current time" anchor
+//! also affects the bytes — set `now_ms` explicitly for byte-stable
+//! replay.
 
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use llm386_core::BlockKind;
 use llm386_core::{
@@ -36,15 +40,58 @@ const SECTION_ORDER: [SectionKind; 9] = [
     SectionKind::Slack,
 ];
 
+/// Optional knobs for [`SimplePacker`].
+///
+/// Defaults preserve the original behavior — bodies are rendered as
+/// stored, with no temporal annotations.
+#[derive(Clone, Default, Debug)]
+pub struct PackerOptions {
+    /// When `true`, prepend each rendered block with its
+    /// `created_at` timestamp in ISO 8601 UTC form
+    /// (`[2026-05-05T11:32:00Z] ...`), and emit a "Current time"
+    /// line at the start of the Task section so the model can
+    /// compute relative times. Defaults to `false`.
+    pub include_timestamps: bool,
+    /// Override the "current time" anchor used when
+    /// `include_timestamps` is `true`. `None` reads `SystemTime::now()`
+    /// at pack time. Set explicitly (e.g. `Some(request_started_at)`)
+    /// for byte-stable replay across invocations.
+    pub now_ms: Option<u64>,
+}
+
 /// String-rendering [`Packer`].
 pub struct SimplePacker<S: BlockStore> {
     store: Arc<S>,
     tokenizer: Arc<dyn Tokenizer>,
+    options: PackerOptions,
 }
 
 impl<S: BlockStore> SimplePacker<S> {
     pub fn new(store: Arc<S>, tokenizer: Arc<dyn Tokenizer>) -> Self {
-        Self { store, tokenizer }
+        Self { store, tokenizer, options: PackerOptions::default() }
+    }
+
+    /// Replace the packer's options. Builder-style.
+    #[must_use]
+    pub fn with_options(mut self, options: PackerOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Convenience: enable [`PackerOptions::include_timestamps`].
+    #[must_use]
+    pub fn with_timestamps(mut self) -> Self {
+        self.options.include_timestamps = true;
+        self
+    }
+
+    fn now_ms(&self) -> u64 {
+        if let Some(ms) = self.options.now_ms {
+            return ms;
+        }
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
     }
 }
 
@@ -85,6 +132,11 @@ impl<S: BlockStore + 'static> Packer for SimplePacker<S> {
                 SectionKind::Task => {
                     if !request.task.is_empty() {
                         write_header(&mut rendered, section);
+                        if self.options.include_timestamps {
+                            rendered.push_str("Current time: ");
+                            rendered.push_str(&format_iso8601_utc(self.now_ms()));
+                            rendered.push_str("\n\n");
+                        }
                         rendered.push_str(&request.task);
                         rendered.push_str("\n\n");
                     }
@@ -104,6 +156,11 @@ impl<S: BlockStore + 'static> Packer for SimplePacker<S> {
                                 block.id,
                             )))
                         })?;
+                        if self.options.include_timestamps {
+                            rendered.push('[');
+                            rendered.push_str(&format_iso8601_utc(block.created_at.0));
+                            rendered.push_str("] ");
+                        }
                         rendered.push_str(body);
                         rendered.push_str("\n\n");
 
@@ -157,6 +214,7 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
     /// `ModelProfile::input_budget`; over-budget plans return
     /// [`PackerError::BudgetExceeded`].
     #[instrument(skip(self, request, plan), fields(model = %request.model.name))]
+    #[allow(clippy::too_many_lines)] // a single linear render pipeline; splitting hurts readability
     pub fn pack_chat(
         &self,
         request: &PageRequest,
@@ -179,6 +237,7 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
         }
 
         let mut messages: Vec<ChatMessage> = Vec::new();
+        let stamps = self.options.include_timestamps;
 
         // (a) System / State / Plan / Retrieved / Background — one
         //     consolidated context message.
@@ -199,7 +258,7 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
             if !context.is_empty() {
                 context.push_str("\n\n");
             }
-            write_section(&mut context, section, blocks)?;
+            write_section(&mut context, section, blocks, stamps)?;
         }
         if !context.is_empty() {
             let role = if request.model.supports_system_role {
@@ -221,10 +280,12 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
                     BlockKind::AssistantMessage => ChatRole::Assistant,
                     _ => ChatRole::User,
                 };
-                messages.push(ChatMessage {
-                    role,
-                    content: body.into(),
-                });
+                let content = if stamps {
+                    format!("[{}] {body}", format_iso8601_utc(block.created_at.0))
+                } else {
+                    body.into()
+                };
+                messages.push(ChatMessage { role, content });
             }
         }
 
@@ -232,18 +293,32 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
         if let Some(tools) = by_section.get(&SectionKind::Tools) {
             for block in tools {
                 let body = block_text(block)?;
+                let content = if stamps {
+                    format!("[{}] {body}", format_iso8601_utc(block.created_at.0))
+                } else {
+                    body.into()
+                };
                 messages.push(ChatMessage {
                     role: ChatRole::Tool,
-                    content: body.into(),
+                    content,
                 });
             }
         }
 
         // (d) Task — final user message.
         if !request.task.is_empty() {
+            let content = if stamps {
+                format!(
+                    "Current time: {}\n\n{}",
+                    format_iso8601_utc(self.now_ms()),
+                    request.task,
+                )
+            } else {
+                request.task.clone()
+            };
             messages.push(ChatMessage {
                 role: ChatRole::User,
-                content: request.task.clone(),
+                content,
             });
         }
 
@@ -272,13 +347,46 @@ fn write_section(
     buf: &mut String,
     section: SectionKind,
     blocks: &[ContextBlock],
+    include_timestamps: bool,
 ) -> Result<(), PackerError> {
     write_header(buf, section);
     for block in blocks {
+        if include_timestamps {
+            buf.push('[');
+            buf.push_str(&format_iso8601_utc(block.created_at.0));
+            buf.push_str("] ");
+        }
         buf.push_str(block_text(block)?);
         buf.push_str("\n\n");
     }
     Ok(())
+}
+
+/// Format a unix-ms timestamp as ISO 8601 UTC,
+/// e.g. `2026-05-05T11:32:00Z`.
+///
+/// Hand-rolled (Howard Hinnant's days-from-epoch ↔ y/m/d algorithm)
+/// so the packer doesn't need a date crate.
+fn format_iso8601_utc(ms_since_epoch: u64) -> String {
+    let secs = ms_since_epoch / 1000;
+    let days = secs / 86_400;
+    let s_of_day = secs % 86_400;
+    let hour = s_of_day / 3600;
+    let minute = (s_of_day / 60) % 60;
+    let second = s_of_day % 60;
+
+    // Days since 1970-01-01 → (year, month, day) via Hinnant's algorithm.
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let (month, year) = if mp < 10 { (mp + 3, y) } else { (mp - 9, y + 1) };
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
 fn block_text(block: &ContextBlock) -> Result<&str, PackerError> {
@@ -586,6 +694,138 @@ mod tests {
         assert!(chat.messages.iter().all(|m| m.role != ChatRole::System));
         assert_eq!(chat.messages[0].role, ChatRole::User);
         assert!(chat.messages[0].content.contains("be brief"));
+    }
+
+    #[test]
+    fn iso8601_formatter_known_values() {
+        assert_eq!(format_iso8601_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_iso8601_utc(1_000), "1970-01-01T00:00:01Z");
+        assert_eq!(format_iso8601_utc(86_400_000), "1970-01-02T00:00:00Z");
+        // 2000-01-01T00:00:00Z = 946684800 unix seconds.
+        assert_eq!(format_iso8601_utc(946_684_800_000), "2000-01-01T00:00:00Z");
+        // 2024-01-01T00:00:00Z, immediately after a leap day on
+        // 2020-02-29 — exercises the era/leap arithmetic.
+        assert_eq!(format_iso8601_utc(1_704_067_200_000), "2024-01-01T00:00:00Z");
+        // 2024-02-29T00:00:00Z — the leap day itself.
+        assert_eq!(format_iso8601_utc(1_709_164_800_000), "2024-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn pack_with_timestamps_prefixes_blocks_and_anchors_now() {
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        let fact_id = store
+            .put(session, make_block(b"important fact", BlockKind::Fact, 1_500_000_000_000, 1))
+            .unwrap();
+        let packer = SimplePacker::new(store, tok).with_options(PackerOptions {
+            include_timestamps: true,
+            now_ms: Some(1_700_000_000_000),
+        });
+        let request = PageRequest {
+            session_id: session,
+            task: "what did we discuss?".into(),
+            model: profile(10_000),
+            required_blocks: vec![],
+        };
+        let plan = PagePlan {
+            selected: vec![fact_id],
+            selections: vec![],
+            omitted: vec![],
+            estimated_tokens: TokenCount::ZERO,
+        };
+        let prompt = packer.pack(&request, &plan).unwrap();
+        // Per-block timestamp prefix.
+        assert!(
+            prompt.rendered.contains("[2017-07-14T02:40:00Z] important fact"),
+            "missing block timestamp: {}",
+            prompt.rendered,
+        );
+        // Current-time anchor in the Task section.
+        assert!(
+            prompt.rendered.contains("Current time: 2023-11-14T22:13:20Z"),
+            "missing current-time anchor: {}",
+            prompt.rendered,
+        );
+    }
+
+    #[test]
+    fn pack_without_timestamps_unchanged() {
+        // Default behavior must not emit timestamp prefixes.
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        let fact_id = store
+            .put(session, make_block(b"plain content", BlockKind::Fact, 1_500_000_000_000, 1))
+            .unwrap();
+        let packer = SimplePacker::new(store, tok);
+        let request = PageRequest {
+            session_id: session,
+            task: "go".into(),
+            model: profile(1_000),
+            required_blocks: vec![],
+        };
+        let plan = PagePlan {
+            selected: vec![fact_id],
+            selections: vec![],
+            omitted: vec![],
+            estimated_tokens: TokenCount::ZERO,
+        };
+        let prompt = packer.pack(&request, &plan).unwrap();
+        assert!(!prompt.rendered.contains("Current time:"));
+        assert!(!prompt.rendered.contains("Z]"));
+        assert!(prompt.rendered.contains("plain content"));
+    }
+
+    #[test]
+    fn pack_chat_with_timestamps_prefixes_each_message() {
+        use llm386_core::ChatRole;
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        let user_id = store
+            .put(
+                session,
+                make_block(b"hello?", BlockKind::UserMessage, 1_500_000_000_000, 2),
+            )
+            .unwrap();
+        let asst_id = store
+            .put(
+                session,
+                make_block(b"hi", BlockKind::AssistantMessage, 1_500_000_001_000, 3),
+            )
+            .unwrap();
+        let packer = SimplePacker::new(store, tok).with_options(PackerOptions {
+            include_timestamps: true,
+            now_ms: Some(1_700_000_000_000),
+        });
+        let request = PageRequest {
+            session_id: session,
+            task: "next?".into(),
+            model: profile(10_000),
+            required_blocks: vec![],
+        };
+        let plan = PagePlan {
+            selected: vec![user_id, asst_id],
+            selections: vec![],
+            omitted: vec![],
+            estimated_tokens: TokenCount::ZERO,
+        };
+        let chat = packer.pack_chat(&request, &plan).unwrap();
+        let by_role: Vec<(ChatRole, String)> = chat
+            .messages
+            .iter()
+            .map(|m| (m.role, m.content.clone()))
+            .collect();
+        // The user/assistant Recent messages each carry their block's timestamp.
+        assert!(by_role.iter().any(|(r, c)| {
+            *r == ChatRole::User && c.starts_with("[2017-07-14T02:40:00Z] hello?")
+        }));
+        assert!(by_role.iter().any(|(r, c)| {
+            *r == ChatRole::Assistant && c.starts_with("[2017-07-14T02:40:01Z] hi")
+        }));
+        // The final task user message has the current-time anchor.
+        let task_msg = chat.messages.last().unwrap();
+        assert_eq!(task_msg.role, ChatRole::User);
+        assert!(task_msg.content.starts_with("Current time: 2023-11-14T22:13:20Z"));
+        assert!(task_msg.content.contains("next?"));
     }
 
     #[test]

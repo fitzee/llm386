@@ -194,7 +194,7 @@ ANTHROPIC_API_KEY=... llm386 summarize --store ./store --session 1 --summarizer 
 
 ### Custom config
 
-A TOML file (passed via `--profiles <path>` or the `LLM386_PROFILES` environment variable) carries four optional sections:
+A TOML file (passed via `--profiles <path>` or the `LLM386_PROFILES` environment variable) carries five optional sections:
 
 ```toml
 [[profile]]
@@ -223,9 +223,12 @@ retrieved  = 0.40
 tools      = 0.15
 background = 0.05
 slack      = 0.05
+
+[packer]
+include_timestamps = true
 ```
 
-`[[profile]]` adds model profiles on top of the built-ins. `[[hf_tokenizer]]` registers a HuggingFace tokenizer.json (used by Llama, Qwen, Mistral, and similar). `[[retriever]]` replaces the default retriever stack. `[section_budgets]` overrides the per-section fractions of the variable budget — fractions sum to ≤ 1.0, anything routed to `slack` is reserved headroom that is never filled. See [`examples/configs/`](./examples/configs/) for three worked profiles (focused Q&A, chat loop, RAG-heavy).
+`[[profile]]` adds model profiles on top of the built-ins. `[[hf_tokenizer]]` registers a HuggingFace tokenizer.json (used by Llama, Qwen, Mistral, and similar). `[[retriever]]` replaces the default retriever stack. `[section_budgets]` overrides the per-section fractions of the variable budget — fractions sum to ≤ 1.0, anything routed to `slack` is reserved headroom that is never filled. `[packer]` toggles opt-in packer behavior — `include_timestamps = true` prepends each rendered block with its ISO 8601 UTC creation timestamp and emits a "Current time" anchor in the Task section so the model can reason about *when* things happened, not just *what* was said. See [`examples/configs/`](./examples/configs/) for three worked profiles (focused Q&A, chat loop, RAG-heavy).
 
 ### Library
 

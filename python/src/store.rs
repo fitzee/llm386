@@ -39,6 +39,7 @@ pub struct Store {
     models: ModelRegistry,
     retriever_entries: Vec<config::RetrieverEntry>,
     section_budgets: Option<llm386_pager::SectionBudgetTable>,
+    packer_options: llm386_packer::PackerOptions,
     python_retrievers: RwLock<Vec<Arc<dyn Retriever>>>,
 }
 
@@ -61,13 +62,18 @@ impl Store {
         let mut tokenizers = default_tokenizers()
             .map_err(|e| LLM386Error::new_err(format!("init tokenizers: {e}")))?;
         let mut models = default_registry();
-        let (retriever_entries, section_budgets) = if let Some(cfg_path) = profiles {
+        let (retriever_entries, section_budgets, packer_options) = if let Some(cfg_path) = profiles
+        {
             let parsed = config::parse(&cfg_path).map_err(LLM386Error::new_err)?;
             let applied = config::apply(parsed, &mut models, &mut tokenizers)
                 .map_err(LLM386Error::new_err)?;
-            (applied.retrievers, applied.section_budgets)
+            (
+                applied.retrievers,
+                applied.section_budgets,
+                applied.packer_options.unwrap_or_default(),
+            )
         } else {
-            (Vec::new(), None)
+            (Vec::new(), None, llm386_packer::PackerOptions::default())
         };
         Ok(Self {
             inner,
@@ -75,6 +81,7 @@ impl Store {
             models,
             retriever_entries,
             section_budgets,
+            packer_options,
             python_retrievers: RwLock::new(Vec::new()),
         })
     }
@@ -242,13 +249,19 @@ impl Store {
 
     /// Run page+pack and return either a rendered prompt or a list
     /// of role-tagged chat messages, optionally recording a trace.
-    #[pyo3(signature = (session, model, task, *, chat = false, trace = None))]
+    ///
+    /// `timestamps=True` opts in to ISO 8601 UTC timestamp prefixes
+    /// on each rendered block plus a "Current time" anchor in the
+    /// task message. Overrides any `[packer]` setting in the config
+    /// file.
+    #[pyo3(signature = (session, model, task, *, chat = false, timestamps = false, trace = None))]
     fn pack(
         &self,
         session: u128,
         model: &str,
         task: &str,
         chat: bool,
+        timestamps: bool,
         trace: Option<PathBuf>,
     ) -> PyResult<PackResult> {
         let (profile, tokenizer) = self.profile_and_tokenizer(model)?;
@@ -263,7 +276,12 @@ impl Store {
         if let Some(budgets) = &self.section_budgets {
             pager = pager.with_budgets(budgets.clone());
         }
-        let packer = SimplePacker::new(self.inner.clone(), tokenizer);
+        let mut packer_options = self.packer_options.clone();
+        if timestamps {
+            packer_options.include_timestamps = true;
+        }
+        let packer =
+            SimplePacker::new(self.inner.clone(), tokenizer).with_options(packer_options);
         let request = PageRequest {
             session_id: SessionId(session),
             task: task.to_string(),

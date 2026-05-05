@@ -84,6 +84,13 @@ pub(crate) enum Command {
         /// of a single string (suitable for chat-completion APIs).
         #[arg(long, conflicts_with = "prompt_only")]
         chat: bool,
+        /// Prepend each rendered block with its ISO 8601 UTC creation
+        /// timestamp and emit a "Current time" anchor in the Task
+        /// section, so the model can reason about when things
+        /// happened. Adds ~12 tokens per block. Overrides any
+        /// `[packer]` setting in the config file.
+        #[arg(long)]
+        timestamps: bool,
         /// Optional trace store path. When set, the call is recorded
         /// and its CallId is printed on stderr.
         #[arg(long)]

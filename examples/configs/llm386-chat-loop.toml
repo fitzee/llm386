@@ -29,3 +29,10 @@ half_life_secs = 3600.0   # 1 hour
 
 [[retriever]]
 kind = "bm25"
+
+# Chat agents typically benefit from temporal context — "two minutes
+# ago," "earlier today," "last week." Each block gets an ISO 8601
+# timestamp prefix and the Task section gets a "Current time" anchor.
+# Cost: ~12 tokens per packed block.
+[packer]
+include_timestamps = true
