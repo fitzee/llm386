@@ -4,6 +4,7 @@
 
 - What does the model see? → [How it works](#how-it-works)
 - How fast is it? → [Performance and sizing](#performance-and-sizing)
+- Will it fill the entire context window? → [Does the runtime pack only what's needed?](#does-the-runtime-pack-only-whats-needed-or-does-it-fill-the-models-context-window)
 - How do I delete data? → [Data lifecycle](#data-lifecycle)
 - How do sessions work? → [Sessions and multi-tenancy](#sessions-and-multi-tenancy)
 - How does retrieval work? → [Retrieval and RAG](#retrieval-and-rag)
@@ -19,6 +20,7 @@
 - [Performance and sizing](#performance-and-sizing)
   - [How much latency does this add to my agent?](#how-much-latency-does-this-add-to-my-agent)
   - [How big can the memory store get?](#how-big-can-the-memory-store-get)
+  - [Does the runtime pack only what's needed, or does it fill the model's context window?](#does-the-runtime-pack-only-whats-needed-or-does-it-fill-the-models-context-window)
 - [Data lifecycle](#data-lifecycle)
   - [If it gets corrupted, can I rebuild it somehow?](#if-it-gets-corrupted-can-i-rebuild-it-somehow)
   - [Is it ever a good idea to purge memory?](#is-it-ever-a-good-idea-to-purge-memory)
@@ -204,6 +206,26 @@ The default LMDB `map_size` is 64 GiB. That is a virtual reservation, not an all
 If you need more, pass a larger `map_size` to `StoreConfig`. LMDB's hard ceiling is your platform's address space (effectively unbounded on 64-bit hosts).
 
 There is no built-in size readout yet. `du -sh ./store` is the easy answer.
+
+### Does the runtime pack only what's needed, or does it fill the model's context window?
+
+The pager filters by relevance, but treats your section budgets as ceilings — when there are enough relevant blocks, it fills them up to the ceiling. Filters that drop content automatically:
+
+- **Off-topic blocks.** Retrievers score every block against the current task. Low-scoring blocks don't make the cut for variable sections regardless of available budget.
+- **Old blocks.** Recency decay (exponential half-life) deweights stale content unless something else (BM25 hit, manual pin, edge dependency) lifts it.
+- **Redundant blocks.** Jaccard overlap on word sets per section drops near-duplicates to `OmissionReason::Redundant` even when budget is available.
+- **Low-priority blocks.** Anything near `priority = 0.0` stays out unless a retriever surfaces it.
+
+The pager does not automatically shrink the prompt below what fits relevant content. With 500 turns of session history and a `Recent` budget of 20% of 95K tokens, the pager will pack roughly 19K of recent messages even when the current query would do fine with 3K. The relevance filter runs inside an allocation that defaults to "fill what you've allocated."
+
+For tighter prompts the knobs are:
+
+- **Tighten section fractions** in `llm386.toml` (`SectionBudgetTable`). Drop `Recent` from 0.20 to 0.05 when the task doesn't benefit from chat history.
+- **Set `score_threshold`** in the scoring policy. Drops anything below it even when budget is available.
+- **Lower `retriever.limit`.** If each retriever returns 50 candidates and only 5 are needed, cap them at 5.
+- **Use the `Slack` section.** Reserved headroom that is never filled — set to 0.30 to leave 30% of the input budget hard-unused.
+
+The trade-off matters. More context is slower (linear in input tokens for time-to-first-token, more once cache misses are involved), more expensive (input tokens cost money), and often produces worse output quality (lost-in-the-middle, attention dilution, instruction drift). For focused tasks — single-fact Q&A, structured extraction — a tight 2K prompt typically beats a 50K kitchen-sink one. Broad tasks (summarization, multi-document reasoning, code understanding) benefit from bigger windows. LLM386 does not pick for you. `llm386 trace diff` between a tight-budget run and a loose-budget run is the cheap way to find the right operating point for a given task.
 
 ---
 
