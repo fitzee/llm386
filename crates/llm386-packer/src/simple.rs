@@ -215,6 +215,7 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
     /// [`PackerError::BudgetExceeded`].
     #[instrument(skip(self, request, plan), fields(model = %request.model.name))]
     #[allow(clippy::too_many_lines)] // a single linear render pipeline; splitting hurts readability
+    #[allow(clippy::similar_names)] // `content` is the ChatMessage field; `context` is the consolidated buffer
     pub fn pack_chat(
         &self,
         request: &PageRequest,
@@ -273,6 +274,13 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
         }
 
         // (b) Recent — preserve user/assistant alternation.
+        //     Note: timestamps are NOT prefixed onto assistant
+        //     messages even when `include_timestamps` is on. The
+        //     model would otherwise see its own past replies
+        //     formatted with a `[ISO]` prefix and mimic that prefix
+        //     in subsequent outputs. User and tool messages are
+        //     fine to prefix because the model treats them as input
+        //     context, not as a template for its own voice.
         if let Some(recent) = by_section.get(&SectionKind::Recent) {
             for block in recent {
                 let body = block_text(block)?;
@@ -280,7 +288,7 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
                     BlockKind::AssistantMessage => ChatRole::Assistant,
                     _ => ChatRole::User,
                 };
-                let content = if stamps {
+                let content = if stamps && role != ChatRole::Assistant {
                     format!("[{}] {body}", format_iso8601_utc(block.created_at.0))
                 } else {
                     body.into()
@@ -776,7 +784,11 @@ mod tests {
     }
 
     #[test]
-    fn pack_chat_with_timestamps_prefixes_each_message() {
+    fn pack_chat_with_timestamps_prefixes_user_and_tool_only() {
+        // Past assistant messages must NOT be prefixed even with
+        // timestamps on, to avoid the model mimicking the prefix
+        // in its own voice. User and tool messages are fine to
+        // prefix because the model treats them as input context.
         use llm386_core::ChatRole;
         let (store, _dir, tok) = setup();
         let session = SessionId(1);
@@ -792,6 +804,17 @@ mod tests {
                 make_block(b"hi", BlockKind::AssistantMessage, 1_500_000_001_000, 3),
             )
             .unwrap();
+        let tool_id = store
+            .put(
+                session,
+                make_block(
+                    b"{\"result\": 42}",
+                    BlockKind::ToolResult,
+                    1_500_000_002_000,
+                    4,
+                ),
+            )
+            .unwrap();
         let packer = SimplePacker::new(store, tok).with_options(PackerOptions {
             include_timestamps: true,
             now_ms: Some(1_700_000_000_000),
@@ -803,7 +826,7 @@ mod tests {
             required_blocks: vec![],
         };
         let plan = PagePlan {
-            selected: vec![user_id, asst_id],
+            selected: vec![user_id, asst_id, tool_id],
             selections: vec![],
             omitted: vec![],
             estimated_tokens: TokenCount::ZERO,
@@ -814,13 +837,32 @@ mod tests {
             .iter()
             .map(|m| (m.role, m.content.clone()))
             .collect();
-        // The user/assistant Recent messages each carry their block's timestamp.
-        assert!(by_role.iter().any(|(r, c)| {
-            *r == ChatRole::User && c.starts_with("[2017-07-14T02:40:00Z] hello?")
-        }));
-        assert!(by_role.iter().any(|(r, c)| {
-            *r == ChatRole::Assistant && c.starts_with("[2017-07-14T02:40:01Z] hi")
-        }));
+
+        // User Recent message: prefixed.
+        assert!(
+            by_role.iter().any(|(r, c)| {
+                *r == ChatRole::User && c.starts_with("[2017-07-14T02:40:00Z] hello?")
+            }),
+            "user message missing timestamp prefix: {by_role:?}",
+        );
+        // Assistant Recent message: NOT prefixed — the assistant
+        // message has the bare body so the model never sees its own
+        // voice with a `[ISO]` prefix to copy.
+        let asst_msg = chat
+            .messages
+            .iter()
+            .find(|m| m.role == ChatRole::Assistant)
+            .expect("assistant message present");
+        assert_eq!(asst_msg.content, "hi");
+        assert!(!asst_msg.content.starts_with('['));
+        // Tool message: prefixed.
+        let tool_msg = chat
+            .messages
+            .iter()
+            .find(|m| m.role == ChatRole::Tool)
+            .expect("tool message present");
+        assert!(tool_msg.content.starts_with("[2017-07-14T02:40:02Z]"));
+
         // The final task user message has the current-time anchor.
         let task_msg = chat.messages.last().unwrap();
         assert_eq!(task_msg.role, ChatRole::User);

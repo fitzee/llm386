@@ -473,7 +473,6 @@ fn page(
 }
 
 #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)] // CLI flags map 1:1 to handler args; refactoring to a struct buys nothing here.
-#[allow(clippy::too_many_arguments)] // CLI wiring; bundling these would obscure the dispatch
 fn pack(
     store_path: &Path,
     session: SessionId,
