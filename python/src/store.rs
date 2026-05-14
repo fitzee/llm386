@@ -299,6 +299,7 @@ impl Store {
             let chat_prompt = packer
                 .pack_chat(&request, &plan)
                 .map_err(|e| LLM386Error::new_err(format!("pack_chat: {e}")))?;
+            let cache_boundary = chat_prompt.cache_boundary;
             let messages: Vec<ChatMessage> =
                 chat_prompt.messages.into_iter().map(ChatMessage::from_rust).collect();
             let trace_id = if let Some(trace_path) = trace {
@@ -315,7 +316,12 @@ impl Store {
             } else {
                 None
             };
-            Ok(PackResult { rendered: None, messages: Some(messages), trace_id })
+            Ok(PackResult {
+                rendered: None,
+                messages: Some(messages),
+                cache_boundary,
+                trace_id,
+            })
         } else {
             let prompt = packer
                 .pack(&request, &plan)
@@ -334,7 +340,12 @@ impl Store {
             } else {
                 None
             };
-            Ok(PackResult { rendered: Some(prompt.rendered), messages: None, trace_id })
+            Ok(PackResult {
+                rendered: Some(prompt.rendered),
+                messages: None,
+                cache_boundary: None,
+                trace_id,
+            })
         }
     }
 

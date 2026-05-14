@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use llm386_core::{
     ChatMessage as RustChatMessage, ChatRole, ContextBlock as RustBlock,
     ModelProfile as RustModelProfile, OmittedBlock as RustOmitted, PagePlan as RustPagePlan,
-    Provenance as RustProvenance, Selection as RustSelection,
+    Provenance as RustProvenance, SectionKind, Selection as RustSelection,
     SelectionReason as RustSelectionReason, TraceRecord as RustTraceRecord,
 };
 
@@ -187,19 +187,30 @@ impl PagePlan {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    /// Lowercased name of the originating [`SectionKind`]
+    /// (`"system"`, `"task"`, `"recent"`, etc.). `None` for messages
+    /// that don't map to a canonical section.
+    pub section: Option<String>,
 }
 
 #[pymethods]
 impl ChatMessage {
     fn __repr__(&self) -> String {
         let preview: String = self.content.chars().take(40).collect();
-        format!("ChatMessage(role={:?}, content={:?})", self.role, preview)
+        format!(
+            "ChatMessage(role={:?}, content={:?}, section={:?})",
+            self.role, preview, self.section,
+        )
     }
 }
 
 impl ChatMessage {
     pub fn from_rust(m: RustChatMessage) -> Self {
-        Self { role: chat_role_to_str(m.role).to_string(), content: m.content }
+        Self {
+            role: chat_role_to_str(m.role).to_string(),
+            content: m.content,
+            section: m.section.map(|s| section_kind_to_str(s).to_string()),
+        }
     }
 }
 
@@ -208,6 +219,11 @@ impl ChatMessage {
 pub struct PackResult {
     pub rendered: Option<String>,
     pub messages: Option<Vec<ChatMessage>>,
+    /// Index of the last message in the stable prefix
+    /// (`messages[0..=cache_boundary]` is cache-stable). `None` when
+    /// `chat=False` or when no message qualifies as part of the
+    /// stable prefix.
+    pub cache_boundary: Option<usize>,
     pub trace_id: Option<String>,
 }
 
@@ -216,8 +232,8 @@ impl PackResult {
     fn __repr__(&self) -> String {
         let mode = if self.messages.is_some() { "chat" } else { "rendered" };
         format!(
-            "PackResult(mode={mode:?}, trace_id={:?})",
-            self.trace_id,
+            "PackResult(mode={mode:?}, cache_boundary={:?}, trace_id={:?})",
+            self.cache_boundary, self.trace_id,
         )
     }
 }
@@ -330,5 +346,19 @@ const fn chat_role_to_str(role: ChatRole) -> &'static str {
         ChatRole::User => "user",
         ChatRole::Assistant => "assistant",
         ChatRole::Tool => "tool",
+    }
+}
+
+const fn section_kind_to_str(s: SectionKind) -> &'static str {
+    match s {
+        SectionKind::System => "system",
+        SectionKind::Task => "task",
+        SectionKind::State => "state",
+        SectionKind::Plan => "plan",
+        SectionKind::Retrieved => "retrieved",
+        SectionKind::Tools => "tools",
+        SectionKind::Recent => "recent",
+        SectionKind::Background => "background",
+        SectionKind::Slack => "slack",
     }
 }

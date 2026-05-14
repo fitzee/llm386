@@ -77,6 +77,9 @@ pub(crate) fn load_config(flag_path: Option<&Path>) -> Result<LoadedConfig> {
         if let Some(p) = parsed.packer {
             packer_options = p;
         }
+        if let Some(c) = parsed.cache {
+            packer_options.cache = c;
+        }
     }
 
     Ok(LoadedConfig {
@@ -95,6 +98,7 @@ struct ParsedConfig {
     retrievers: Vec<RetrieverEntry>,
     section_budgets: Option<llm386_pager::SectionBudgetTable>,
     packer: Option<llm386_packer::PackerOptions>,
+    cache: Option<llm386_packer::CacheOptions>,
 }
 
 #[derive(Deserialize)]
@@ -109,6 +113,8 @@ struct ConfigFile {
     section_budgets: Option<SectionBudgetEntry>,
     #[serde(default)]
     packer: Option<PackerEntry>,
+    #[serde(default)]
+    cache: Option<CacheEntry>,
 }
 
 /// `[packer]` table — opt-in packer behavior knobs. Mirrors
@@ -127,7 +133,48 @@ impl PackerEntry {
         llm386_packer::PackerOptions {
             include_timestamps: self.include_timestamps,
             now_ms: None,
+            cache: llm386_packer::CacheOptions::default(),
         }
+    }
+}
+
+/// `[cache]` table — prompt-cache knobs for `pack_chat`.
+///
+/// `stable_sections` lists which sections are considered stable
+/// across turns. Section names are lowercased SectionKind variants:
+/// `"system"`, `"state"`, `"plan"`, `"retrieved"`, `"background"`.
+/// Sections outside this list are emitted after the stable prefix
+/// so they don't break the cache key.
+#[derive(Default, Deserialize)]
+struct CacheEntry {
+    #[serde(default)]
+    stable_sections: Option<Vec<String>>,
+}
+
+impl CacheEntry {
+    fn build(self) -> Result<llm386_packer::CacheOptions> {
+        use llm386_core::SectionKind;
+        let mut out = llm386_packer::CacheOptions::default();
+        if let Some(names) = self.stable_sections {
+            let mut sections = Vec::with_capacity(names.len());
+            for name in names {
+                let s = match name.to_ascii_lowercase().as_str() {
+                    "system" => SectionKind::System,
+                    "state" => SectionKind::State,
+                    "plan" => SectionKind::Plan,
+                    "retrieved" => SectionKind::Retrieved,
+                    "background" => SectionKind::Background,
+                    other => {
+                        return Err(anyhow!(
+                            "[cache].stable_sections: unsupported section `{other}` — valid: system, state, plan, retrieved, background",
+                        ));
+                    }
+                };
+                sections.push(s);
+            }
+            out.stable_sections = sections;
+        }
+        Ok(out)
     }
 }
 
@@ -210,12 +257,14 @@ pub(crate) struct RetrieverEntry {
 
 fn parse_config_toml(s: &str) -> Result<ParsedConfig> {
     let parsed: ConfigFile = toml::from_str(s)?;
+    let cache = parsed.cache.map(CacheEntry::build).transpose()?;
     Ok(ParsedConfig {
         profiles: parsed.profile,
         hf_tokenizers: parsed.hf_tokenizer,
         retrievers: parsed.retriever,
         section_budgets: parsed.section_budgets.map(SectionBudgetEntry::build),
         packer: parsed.packer.map(PackerEntry::build),
+        cache,
     })
 }
 
@@ -537,16 +586,20 @@ fn pack(
     if chat {
         // Re-render the same plan as role-tagged messages.
         let chat_prompt = packer.pack_chat(&request, &plan)?;
-        eprintln!("# model:         {}", chat_prompt.model);
-        eprintln!("# input_tokens:  {}", chat_prompt.input_tokens);
-        eprintln!("# messages:      {}", chat_prompt.messages.len());
-        eprintln!("# duration_ms:   {duration_ms}");
+        eprintln!("# model:          {}", chat_prompt.model);
+        eprintln!("# input_tokens:   {}", chat_prompt.input_tokens);
+        eprintln!("# messages:       {}", chat_prompt.messages.len());
+        match chat_prompt.cache_boundary {
+            Some(n) => eprintln!("# cache_boundary: {n} (messages[0..={n}] cacheable)"),
+            None => eprintln!("# cache_boundary: none"),
+        }
+        eprintln!("# duration_ms:    {duration_ms}");
         if let Some(id) = trace_id {
-            eprintln!("# trace_id:      {id}");
+            eprintln!("# trace_id:       {id}");
         }
         eprintln!("---");
-        let json = serde_json::to_string_pretty(&chat_prompt.messages)
-            .context("serializing chat messages")?;
+        let json = serde_json::to_string_pretty(&chat_prompt)
+            .context("serializing chat prompt")?;
         println!("{json}");
     } else if prompt_only {
         print!("{}", prompt.rendered);

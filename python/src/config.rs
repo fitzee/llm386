@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use llm386_core::{ModelProfile, ModelRegistry, Retriever, SectionKind, TokenizerId};
-use llm386_packer::PackerOptions;
+use llm386_packer::{CacheOptions, PackerOptions};
 use llm386_pager::{
     Bm25Retriever, LexicalRetriever, RecencyRetriever, SectionBudgetTable, SessionRetriever,
 };
@@ -28,6 +28,8 @@ pub(crate) struct ConfigFile {
     pub section_budgets: Option<SectionBudgetEntry>,
     #[serde(default)]
     pub packer: Option<PackerEntry>,
+    #[serde(default)]
+    pub cache: Option<CacheEntry>,
 }
 
 #[derive(Default, Deserialize)]
@@ -41,7 +43,40 @@ impl PackerEntry {
         PackerOptions {
             include_timestamps: self.include_timestamps,
             now_ms: None,
+            cache: CacheOptions::default(),
         }
+    }
+}
+
+#[derive(Default, Deserialize)]
+pub(crate) struct CacheEntry {
+    #[serde(default)]
+    stable_sections: Option<Vec<String>>,
+}
+
+impl CacheEntry {
+    pub(crate) fn build(self) -> Result<CacheOptions, String> {
+        let mut out = CacheOptions::default();
+        if let Some(names) = self.stable_sections {
+            let mut sections = Vec::with_capacity(names.len());
+            for name in names {
+                let s = match name.to_ascii_lowercase().as_str() {
+                    "system" => SectionKind::System,
+                    "state" => SectionKind::State,
+                    "plan" => SectionKind::Plan,
+                    "retrieved" => SectionKind::Retrieved,
+                    "background" => SectionKind::Background,
+                    other => {
+                        return Err(format!(
+                            "[cache].stable_sections: unsupported section `{other}` — valid: system, state, plan, retrieved, background",
+                        ));
+                    }
+                };
+                sections.push(s);
+            }
+            out.stable_sections = sections;
+        }
+        Ok(out)
     }
 }
 
@@ -149,10 +184,16 @@ pub(crate) fn apply(
         )?;
         tokenizers.register(Arc::new(tok));
     }
+    let mut packer_options = parsed.packer.map(PackerEntry::build);
+    if let Some(cache) = parsed.cache {
+        let cache_opts = cache.build()?;
+        let opts = packer_options.get_or_insert_with(PackerOptions::default);
+        opts.cache = cache_opts;
+    }
     Ok(Applied {
         retrievers: parsed.retriever,
         section_budgets: parsed.section_budgets.map(SectionBudgetEntry::build),
-        packer_options: parsed.packer.map(PackerEntry::build),
+        packer_options,
     })
 }
 

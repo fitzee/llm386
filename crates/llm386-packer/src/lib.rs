@@ -8,4 +8,4 @@
 
 mod simple;
 
-pub use simple::{PackerOptions, SimplePacker};
+pub use simple::{CacheOptions, PackerOptions, SimplePacker};

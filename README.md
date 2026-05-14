@@ -91,6 +91,22 @@ All retriever scores must be normalized to `[0, 1]`. Mixing scoring systems (BM2
 
 LLM386 is a working-set manager for LLMs.
 
+## Token savings
+
+The runtime does not shrink any individual block. It controls *whether* a block is included, *how* it's ordered, and whether a cheaper substitute fits in its place. The levers:
+
+**Section budgets are a hard ceiling.** Working sets drift upward over time as new retrievers and tools get bolted on. `SectionBudgetTable` caps each section; anything that doesn't fit is omitted with a reason recorded in the trace. Prompts cannot silently grow.
+
+**Content-hash dedupe.** Identical bytes are stored once. The same fact arriving from two retrievers is one block in the store and one block in the prompt.
+
+**Summary substitution.** With `llm386 summarize ... --store-summary` (truncating or Anthropic-backed), the pager can prefer a short `Summary` block over a long transcript block under budget pressure. The runtime provides the slot; the savings only materialize if you actually run summarization.
+
+**Cache-friendly determinism + an explicit cache boundary.** Anthropic and OpenAI prompt caching key off stable prefixes. The `pack_chat` output emits one message per section, ordered with `stable_sections` (default: `system` + `background`) at the front, and returns a `cache_boundary` index pointing at the last message of the stable prefix. A provider adapter can set Anthropic `cache_control` on `messages[cache_boundary]` or slice `messages[0..=cache_boundary]` into a Gemini `CachedContent` — turn N and turn N+1 share that prefix and the cached portion is billed at a fraction of full price. OpenAI auto-caches and ignores the boundary. Configurable per project via `[cache] stable_sections` in the TOML config.
+
+**Pre-tokenized counts.** Token counts are cached per tokenizer and per block. The prompt cost is known before the call, not discovered at the API.
+
+Realistic expectation: against a "concat everything into the prompt" baseline in a long-running session, the combined effect is large — often a 5–20× input-token reduction once budgets, summarization, and cache hits are all on. Against an already-tight RAG pipeline that hand-picks its context per call, the marginal win is smaller: primarily dedupe, cache hits, and the safety of a ceiling that cannot be exceeded.
+
 ## Failure modes
 
 The runtime makes context assembly inspectable; it doesn't prevent you from feeding it nonsense. Common issues in production:
@@ -194,7 +210,7 @@ ANTHROPIC_API_KEY=... llm386 summarize --store ./store --session 1 --summarizer 
 
 ### Custom config
 
-A TOML file (passed via `--profiles <path>` or the `LLM386_PROFILES` environment variable) carries five optional sections:
+A TOML file (passed via `--profiles <path>` or the `LLM386_PROFILES` environment variable) carries six optional sections:
 
 ```toml
 [[profile]]
@@ -226,9 +242,12 @@ slack      = 0.05
 
 [packer]
 include_timestamps = true
+
+[cache]
+stable_sections = ["system", "background"]
 ```
 
-`[[profile]]` adds model profiles on top of the built-ins. `[[hf_tokenizer]]` registers a HuggingFace tokenizer.json (used by Llama, Qwen, Mistral, and similar). `[[retriever]]` replaces the default retriever stack. `[section_budgets]` overrides the per-section fractions of the variable budget — fractions sum to ≤ 1.0, anything routed to `slack` is reserved headroom that is never filled. `[packer]` toggles opt-in packer behavior — `include_timestamps = true` prepends each rendered block with its ISO 8601 UTC creation timestamp and emits a "Current time" anchor in the Task section so the model can reason about *when* things happened, not just *what* was said. See [`examples/configs/`](./examples/configs/) for three worked profiles (focused Q&A, chat loop, RAG-heavy).
+`[[profile]]` adds model profiles on top of the built-ins. `[[hf_tokenizer]]` registers a HuggingFace tokenizer.json (used by Llama, Qwen, Mistral, and similar). `[[retriever]]` replaces the default retriever stack. `[section_budgets]` overrides the per-section fractions of the variable budget — fractions sum to ≤ 1.0, anything routed to `slack` is reserved headroom that is never filled. `[packer]` toggles opt-in packer behavior — `include_timestamps = true` prepends each rendered block with its ISO 8601 UTC creation timestamp and emits a "Current time" anchor in the Task section so the model can reason about *when* things happened, not just *what* was said. `[cache]` declares which sections (`system`, `state`, `plan`, `retrieved`, `background`) are considered stable across turns; `pack_chat` emits stable sections first and returns a `cache_boundary` index pointing at the last stable message, for downstream adapters to set provider cache markers (Anthropic `cache_control`, Gemini `CachedContent`). Default `stable_sections = ["system", "background"]`. See [`examples/configs/`](./examples/configs/) for three worked profiles (focused Q&A, chat loop, RAG-heavy).
 
 ### Library
 

@@ -57,6 +57,36 @@ pub struct PackerOptions {
     /// at pack time. Set explicitly (e.g. `Some(request_started_at)`)
     /// for byte-stable replay across invocations.
     pub now_ms: Option<u64>,
+    /// Cache-boundary knobs for `pack_chat`. Defaults to
+    /// [`CacheOptions::default()`].
+    pub cache: CacheOptions,
+}
+
+/// Prompt-cache knobs for [`SimplePacker::pack_chat`].
+///
+/// Only sections listed in `stable_sections` are emitted as part of
+/// the stable prefix that [`ChatPrompt::cache_boundary`] points at.
+/// Within that prefix, messages are ordered by the canonical
+/// section order (System → State → Plan → Retrieved → Background);
+/// non-stable sections are emitted after the stable prefix so they
+/// don't break the cache key.
+///
+/// Default: `System` and `Background` are considered stable.
+/// `Tools` is not the default since "tools" here covers
+/// `BlockKind::ToolResult` (tool outputs from prior turns), which
+/// are call-dependent and not generally cache-stable. Tool *schemas*
+/// would be cache-stable but aren't a distinct section yet.
+#[derive(Clone, Debug)]
+pub struct CacheOptions {
+    pub stable_sections: Vec<SectionKind>,
+}
+
+impl Default for CacheOptions {
+    fn default() -> Self {
+        Self {
+            stable_sections: vec![SectionKind::System, SectionKind::Background],
+        }
+    }
 }
 
 /// String-rendering [`Packer`].
@@ -200,22 +230,30 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
     ///
     /// Mapping:
     ///
-    /// - System / State / Plan / Retrieved / Background → folded
-    ///   into a single `system` message (or `user` if the model's
-    ///   `supports_system_role` is false), with section headers
-    ///   preserved so the model can tell them apart.
+    /// - Each system-side section (System / State / Plan /
+    ///   Retrieved / Background) → one `system` message (or `user`
+    ///   when the model's `supports_system_role` is false), tagged
+    ///   with its [`SectionKind`]. Sections in
+    ///   [`CacheOptions::stable_sections`] are emitted first (in
+    ///   canonical order); the remaining system-side sections
+    ///   follow. This puts the cache-stable prefix at the front of
+    ///   the message list.
     /// - Recent (`UserMessage` / `AssistantMessage`) → individual
     ///   role-tagged messages in `BlockId` order.
     /// - Tool results → individual `tool` messages, emitted just
     ///   before the final task message.
     /// - Task → final `user` message containing `request.task`.
     ///
+    /// Every message carries its originating
+    /// [`ChatMessage::section`] for downstream provider adapters.
+    /// `ChatPrompt::cache_boundary` is the index of the last
+    /// message belonging to the stable prefix.
+    ///
     /// As with [`pack`], the result is verified against
     /// `ModelProfile::input_budget`; over-budget plans return
     /// [`PackerError::BudgetExceeded`].
     #[instrument(skip(self, request, plan), fields(model = %request.model.name))]
     #[allow(clippy::too_many_lines)] // a single linear render pipeline; splitting hurts readability
-    #[allow(clippy::similar_names)] // `content` is the ChatMessage field; `context` is the consolidated buffer
     pub fn pack_chat(
         &self,
         request: &PageRequest,
@@ -240,37 +278,68 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
         let mut messages: Vec<ChatMessage> = Vec::new();
         let stamps = self.options.include_timestamps;
 
-        // (a) System / State / Plan / Retrieved / Background — one
-        //     consolidated context message.
-        let mut context = String::new();
-        for &section in &[
+        // (a) System-side sections, one message per section.
+        //     Stable sections first (in canonical order), then the
+        //     rest. The stable prefix sits at the front of the
+        //     message list so `cache_boundary` is a contiguous
+        //     `0..=N` range that a provider adapter can mark as a
+        //     cache key.
+        const SYSTEM_SIDE: [SectionKind; 5] = [
             SectionKind::System,
             SectionKind::State,
             SectionKind::Plan,
             SectionKind::Retrieved,
             SectionKind::Background,
-        ] {
+        ];
+        let stable = &self.options.cache.stable_sections;
+        let role_for_sys = if request.model.supports_system_role {
+            ChatRole::System
+        } else {
+            ChatRole::User
+        };
+        let ordered = SYSTEM_SIDE
+            .iter()
+            .filter(|s| stable.contains(s))
+            .chain(SYSTEM_SIDE.iter().filter(|s| !stable.contains(s)));
+
+        let mut stable_message_count: usize = 0;
+        let mut still_in_stable_prefix = true;
+
+        for &section in ordered {
             let Some(blocks) = by_section.get(&section) else {
                 continue;
             };
             if blocks.is_empty() {
                 continue;
             }
-            if !context.is_empty() {
-                context.push_str("\n\n");
+            // Preserve the `## SectionName` header inside the
+            // message content so a model that ingests multiple
+            // system-role messages can still see explicit
+            // structure. The header is stable bytes — it doesn't
+            // hurt cache hits.
+            let mut content = String::new();
+            content.push_str("## ");
+            content.push_str(section_label(section));
+            content.push_str("\n\n");
+            for block in blocks {
+                if stamps {
+                    content.push('[');
+                    content.push_str(&format_iso8601_utc(block.created_at.0));
+                    content.push_str("] ");
+                }
+                content.push_str(block_text(block)?);
+                content.push_str("\n\n");
             }
-            write_section(&mut context, section, blocks, stamps)?;
-        }
-        if !context.is_empty() {
-            let role = if request.model.supports_system_role {
-                ChatRole::System
-            } else {
-                ChatRole::User
-            };
             messages.push(ChatMessage {
-                role,
-                content: context.trim_end().into(),
+                role: role_for_sys,
+                content: content.trim_end().to_string(),
+                section: Some(section),
             });
+            if still_in_stable_prefix && stable.contains(&section) {
+                stable_message_count += 1;
+            } else {
+                still_in_stable_prefix = false;
+            }
         }
 
         // (b) Recent — preserve user/assistant alternation.
@@ -293,7 +362,11 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
                 } else {
                     body.into()
                 };
-                messages.push(ChatMessage { role, content });
+                messages.push(ChatMessage {
+                    role,
+                    content,
+                    section: Some(SectionKind::Recent),
+                });
             }
         }
 
@@ -309,6 +382,7 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
                 messages.push(ChatMessage {
                     role: ChatRole::Tool,
                     content,
+                    section: Some(SectionKind::Tools),
                 });
             }
         }
@@ -327,6 +401,7 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
             messages.push(ChatMessage {
                 role: ChatRole::User,
                 content,
+                section: Some(SectionKind::Task),
             });
         }
 
@@ -343,31 +418,15 @@ impl<S: BlockStore + 'static> SimplePacker<S> {
             });
         }
 
+        let cache_boundary = stable_message_count.checked_sub(1);
+
         Ok(ChatPrompt {
             model: request.model.name.clone(),
             input_tokens: total,
             messages,
+            cache_boundary,
         })
     }
-}
-
-fn write_section(
-    buf: &mut String,
-    section: SectionKind,
-    blocks: &[ContextBlock],
-    include_timestamps: bool,
-) -> Result<(), PackerError> {
-    write_header(buf, section);
-    for block in blocks {
-        if include_timestamps {
-            buf.push('[');
-            buf.push_str(&format_iso8601_utc(block.created_at.0));
-            buf.push_str("] ");
-        }
-        buf.push_str(block_text(block)?);
-        buf.push_str("\n\n");
-    }
-    Ok(())
 }
 
 /// Format a unix-ms timestamp as ISO 8601 UTC,
@@ -728,6 +787,7 @@ mod tests {
         let packer = SimplePacker::new(store, tok).with_options(PackerOptions {
             include_timestamps: true,
             now_ms: Some(1_700_000_000_000),
+            cache: CacheOptions::default(),
         });
         let request = PageRequest {
             session_id: session,
@@ -818,6 +878,7 @@ mod tests {
         let packer = SimplePacker::new(store, tok).with_options(PackerOptions {
             include_timestamps: true,
             now_ms: Some(1_700_000_000_000),
+            cache: CacheOptions::default(),
         });
         let request = PageRequest {
             session_id: session,
@@ -901,6 +962,223 @@ mod tests {
             .find(|m| m.role == ChatRole::Tool)
             .unwrap();
         assert_eq!(tool_msg.content, "{\"result\": 42}");
+    }
+
+    #[test]
+    fn pack_chat_splits_system_side_sections_into_separate_messages() {
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        let sys_id = store
+            .put(session, make_block(b"SYS-CONTENT", BlockKind::System, 1, 1))
+            .unwrap();
+        let state_id = store
+            .put(session, make_block(b"STATE-CONTENT", BlockKind::State, 2, 2))
+            .unwrap();
+        let bg_id = store
+            .put(session, make_block(b"BG-CONTENT", BlockKind::DocumentChunk, 3, 3))
+            .unwrap();
+        let packer = SimplePacker::new(store, tok);
+        let request = PageRequest {
+            session_id: session,
+            task: "t".into(),
+            model: profile(1_000),
+            required_blocks: vec![],
+        };
+        let plan = PagePlan {
+            selected: vec![sys_id, state_id, bg_id],
+            selections: vec![],
+            omitted: vec![],
+            estimated_tokens: TokenCount::ZERO,
+        };
+        let chat = packer.pack_chat(&request, &plan).unwrap();
+        // No section's content is consolidated with another's:
+        // each system-side section produces its own message
+        // containing only that section's body.
+        let by_section: std::collections::HashMap<_, _> = chat
+            .messages
+            .iter()
+            .filter_map(|m| m.section.map(|s| (s, m.content.clone())))
+            .collect();
+        let sys = by_section.get(&SectionKind::System).expect("system message");
+        assert!(sys.contains("SYS-CONTENT"));
+        assert!(!sys.contains("STATE-CONTENT") && !sys.contains("BG-CONTENT"));
+        let state = by_section.get(&SectionKind::State).expect("state message");
+        assert!(state.contains("STATE-CONTENT"));
+        assert!(!state.contains("SYS-CONTENT") && !state.contains("BG-CONTENT"));
+        let bg = by_section
+            .get(&SectionKind::Background)
+            .expect("background message");
+        assert!(bg.contains("BG-CONTENT"));
+        assert!(!bg.contains("SYS-CONTENT") && !bg.contains("STATE-CONTENT"));
+        // Every message carries its section tag.
+        assert!(chat.messages.iter().all(|m| m.section.is_some()));
+    }
+
+    #[test]
+    fn pack_chat_cache_boundary_covers_default_stable_sections() {
+        // Default stable_sections = [System, Background]. With both
+        // sections populated plus a State block in between, the
+        // boundary should point at the 2nd message (System then
+        // Background, then State after the boundary).
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        let sys_id = store
+            .put(session, make_block(b"sys", BlockKind::System, 1, 1))
+            .unwrap();
+        let state_id = store
+            .put(session, make_block(b"state", BlockKind::State, 2, 2))
+            .unwrap();
+        let bg_id = store
+            .put(session, make_block(b"bg", BlockKind::DocumentChunk, 3, 3))
+            .unwrap();
+        let packer = SimplePacker::new(store, tok);
+        let request = PageRequest {
+            session_id: session,
+            task: "go".into(),
+            model: profile(1_000),
+            required_blocks: vec![],
+        };
+        let plan = PagePlan {
+            selected: vec![sys_id, state_id, bg_id],
+            selections: vec![],
+            omitted: vec![],
+            estimated_tokens: TokenCount::ZERO,
+        };
+        let chat = packer.pack_chat(&request, &plan).unwrap();
+        // Stable prefix is the first 2 messages (System then Background).
+        assert_eq!(chat.cache_boundary, Some(1));
+        assert_eq!(
+            chat.messages[0].section,
+            Some(llm386_core::SectionKind::System),
+        );
+        assert_eq!(
+            chat.messages[1].section,
+            Some(llm386_core::SectionKind::Background),
+        );
+        // Unstable sections (State) follow the stable prefix.
+        assert_eq!(
+            chat.messages[2].section,
+            Some(llm386_core::SectionKind::State),
+        );
+    }
+
+    #[test]
+    fn pack_chat_cache_boundary_is_none_when_no_stable_sections_present() {
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        // Only State + Recent — neither is in the default stable set.
+        let state_id = store
+            .put(session, make_block(b"state", BlockKind::State, 1, 1))
+            .unwrap();
+        let user_id = store
+            .put(session, make_block(b"hi", BlockKind::UserMessage, 2, 2))
+            .unwrap();
+        let packer = SimplePacker::new(store, tok);
+        let request = PageRequest {
+            session_id: session,
+            task: "t".into(),
+            model: profile(1_000),
+            required_blocks: vec![],
+        };
+        let plan = PagePlan {
+            selected: vec![state_id, user_id],
+            selections: vec![],
+            omitted: vec![],
+            estimated_tokens: TokenCount::ZERO,
+        };
+        let chat = packer.pack_chat(&request, &plan).unwrap();
+        assert_eq!(chat.cache_boundary, None);
+    }
+
+    #[test]
+    fn pack_chat_cache_boundary_respects_custom_stable_sections() {
+        // Mark only State as stable; System and Background should
+        // land *after* the stable prefix.
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        let sys_id = store
+            .put(session, make_block(b"sys", BlockKind::System, 1, 1))
+            .unwrap();
+        let state_id = store
+            .put(session, make_block(b"state", BlockKind::State, 2, 2))
+            .unwrap();
+        let packer = SimplePacker::new(store, tok).with_options(PackerOptions {
+            include_timestamps: false,
+            now_ms: None,
+            cache: CacheOptions {
+                stable_sections: vec![SectionKind::State],
+            },
+        });
+        let request = PageRequest {
+            session_id: session,
+            task: "t".into(),
+            model: profile(1_000),
+            required_blocks: vec![],
+        };
+        let plan = PagePlan {
+            selected: vec![sys_id, state_id],
+            selections: vec![],
+            omitted: vec![],
+            estimated_tokens: TokenCount::ZERO,
+        };
+        let chat = packer.pack_chat(&request, &plan).unwrap();
+        // State first (stable), then System (unstable in this config).
+        assert_eq!(chat.cache_boundary, Some(0));
+        assert_eq!(
+            chat.messages[0].section,
+            Some(llm386_core::SectionKind::State),
+        );
+        assert_eq!(
+            chat.messages[1].section,
+            Some(llm386_core::SectionKind::System),
+        );
+    }
+
+    #[test]
+    fn pack_chat_recent_tools_task_carry_section_tags() {
+        let (store, _dir, tok) = setup();
+        let session = SessionId(1);
+        let user_id = store
+            .put(session, make_block(b"hi", BlockKind::UserMessage, 1, 1))
+            .unwrap();
+        let asst_id = store
+            .put(session, make_block(b"hey", BlockKind::AssistantMessage, 2, 2))
+            .unwrap();
+        let tool_id = store
+            .put(session, make_block(b"{}", BlockKind::ToolResult, 3, 3))
+            .unwrap();
+        let packer = SimplePacker::new(store, tok);
+        let request = PageRequest {
+            session_id: session,
+            task: "next?".into(),
+            model: profile(1_000),
+            required_blocks: vec![],
+        };
+        let plan = PagePlan {
+            selected: vec![user_id, asst_id, tool_id],
+            selections: vec![],
+            omitted: vec![],
+            estimated_tokens: TokenCount::ZERO,
+        };
+        let chat = packer.pack_chat(&request, &plan).unwrap();
+        // Recent messages tagged as Recent (regardless of role).
+        let recent_count = chat
+            .messages
+            .iter()
+            .filter(|m| m.section == Some(SectionKind::Recent))
+            .count();
+        assert_eq!(recent_count, 2);
+        // Tool message tagged as Tools.
+        assert!(
+            chat.messages
+                .iter()
+                .any(|m| m.section == Some(SectionKind::Tools)),
+        );
+        // Final message tagged as Task.
+        assert_eq!(
+            chat.messages.last().unwrap().section,
+            Some(SectionKind::Task),
+        );
     }
 
     proptest::proptest! {
