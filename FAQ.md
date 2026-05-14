@@ -5,6 +5,7 @@
 - What does the model see? → [How it works](#how-it-works)
 - How fast is it? → [Performance and sizing](#performance-and-sizing)
 - Will it fill the entire context window? → [Does the runtime pack only what's needed?](#does-the-runtime-pack-only-whats-needed-or-does-it-fill-the-models-context-window)
+- Does it lower token cost? → [Cost and prompt caching](#does-this-reduce-token-cost-how-do-i-get-prompt-caching-to-actually-hit)
 - How do I delete data? → [Data lifecycle](#data-lifecycle)
 - How do sessions work? → [Sessions and multi-tenancy](#sessions-and-multi-tenancy)
 - How does retrieval work? → [Retrieval and RAG](#retrieval-and-rag)
@@ -21,6 +22,7 @@
   - [How much latency does this add to my agent?](#how-much-latency-does-this-add-to-my-agent)
   - [How big can the memory store get?](#how-big-can-the-memory-store-get)
   - [Does the runtime pack only what's needed, or does it fill the model's context window?](#does-the-runtime-pack-only-whats-needed-or-does-it-fill-the-models-context-window)
+  - [Does this reduce token cost? How do I get prompt caching to actually hit?](#does-this-reduce-token-cost-how-do-i-get-prompt-caching-to-actually-hit)
 - [Data lifecycle](#data-lifecycle)
   - [If it gets corrupted, can I rebuild it somehow?](#if-it-gets-corrupted-can-i-rebuild-it-somehow)
   - [Is it ever a good idea to purge memory?](#is-it-ever-a-good-idea-to-purge-memory)
@@ -226,6 +228,33 @@ For tighter prompts the knobs are:
 - **Use the `Slack` section.** Reserved headroom that is never filled — set to 0.30 to leave 30% of the input budget hard-unused.
 
 The trade-off matters. More context is slower (linear in input tokens for time-to-first-token, more once cache misses are involved), more expensive (input tokens cost money), and often produces worse output quality (lost-in-the-middle, attention dilution, instruction drift). For focused tasks — single-fact Q&A, structured extraction — a tight 2K prompt typically beats a 50K kitchen-sink one. Broad tasks (summarization, multi-document reasoning, code understanding) benefit from bigger windows. LLM386 does not pick for you. `llm386 trace diff` between a tight-budget run and a loose-budget run is the cheap way to find the right operating point for a given task.
+
+### Does this reduce token cost? How do I get prompt caching to actually hit?
+
+Yes — and the cache-hit lever is often bigger than the per-block savings. Prompt caching is a server-side feature on every major provider: the server stores a tokenized prefix of your prompt and reuses it on subsequent calls at a fraction of the input price.
+
+| provider  | cache hit          | cache write          | TTL                        |
+|-----------|--------------------|----------------------|----------------------------|
+| Anthropic | 10% of input price | 125% of input price  | 5 min (1 hr beta)          |
+| OpenAI    | 50% of input price | same as input        | ~5–10 min                  |
+| Gemini    | small per-token    | upfront + storage    | 1 hr default, configurable |
+
+The cache key is the **exact token sequence of the prefix**. A single byte different early in the prompt and the cache misses. So the lever is a *stable prefix across turns* — and that's what `pack_chat` is built to produce.
+
+**How LLM386 helps.** `pack_chat` emits one chat message per non-empty section and orders the sections in `[cache] stable_sections` first (default: `system` + `background`; the other valid values are `state`, `plan`, `retrieved`). The result includes a `cache_boundary` index pointing at the last message of the stable prefix. Provider adapters consume that index:
+
+- **OpenAI** — transparent. OpenAI auto-caches stable prefixes ≥1024 tokens. The deterministic packing is enough; no extra wiring required.
+- **Anthropic** — your code reads `cache_boundary` and sets `cache_control: { type: "ephemeral" }` on `messages[cache_boundary]` when calling the SDK. Up to 4 markers per request.
+- **Gemini** — your code slices `messages[0..=cache_boundary]` into a `CachedContent` create call and references the cache id from subsequent calls. Manage TTL refresh per session.
+
+**What goes in the stable prefix.** Long system prompts; tool/function schemas; user profile and other long-lived facts; the document the user is chatting over. **What doesn't.** This turn's user message, recent transcript, this turn's tool results, anything that changes per call.
+
+**When this doesn't save money.**
+- The stable prefix is below the provider's cache minimum (≈1024 tokens on OpenAI/Anthropic).
+- The session doesn't reuse the prefix within the TTL. Anthropic's 5-min default is short for sparse traffic, and the 25% write premium means caching only pays off if the prefix is reused at least once.
+- The sections you marked as stable turn out not to be. A new System block invalidates the cache for every subsequent turn until the prefix stabilizes — the bytes have to match exactly.
+
+**Quick inspection.** `llm386 pack --chat ...` prints `cache_boundary: N (messages[0..=N] cacheable)` on stderr so you can see how much of each turn is cache-eligible before sending. The full `ChatPrompt` JSON (on stdout) tags every message with its section, so it's straightforward to verify which sections landed in the stable prefix.
 
 ---
 
