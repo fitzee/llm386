@@ -1,0 +1,21 @@
+# Cascade-routing demo config.
+#
+# Retriever stack: BM25 + recency. The cheap model can answer most
+# turns from BM25 hits against the background document; the
+# escalation path falls back on the same selection re-rendered for
+# the expensive model.
+
+[[retriever]]
+kind = "bm25"
+
+[[retriever]]
+kind = "recency"
+half_life_secs = 600.0
+
+# Pin the system prompt and the background document to the stable
+# prefix. pack_chat returns cache_boundary pointing at the last
+# message in this prefix; agent.py sets Anthropic cache_control on
+# that message so the prefix is cached across turns. Both Haiku and
+# Opus get their own cache pool — Anthropic caches per-model.
+[cache]
+stable_sections = ["system", "background"]

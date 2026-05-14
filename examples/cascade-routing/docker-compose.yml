@@ -1,0 +1,40 @@
+# Run the demo:
+#
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   docker compose -f examples/cascade-routing/docker-compose.yml run --rm agent
+#
+# The first build takes a few minutes (Rust + maturin compile from source).
+# Subsequent runs reuse the cached image and start in seconds.
+
+services:
+  agent:
+    build:
+      # Build context is the project root so the Dockerfile can COPY the
+      # workspace's Cargo.toml, crates/, and python/ directories.
+      context: ../..
+      dockerfile: examples/cascade-routing/Dockerfile
+    image: llm386-cascade-demo
+    stdin_open: true
+    tty: true
+    environment:
+      - ANTHROPIC_API_KEY
+      - LLM386_SESSION=1
+      # Override the model tiers if you want — defaults are
+      # claude-haiku-4-5 (cheap) and claude-opus-4-7 (expensive).
+      - LLM386_CHEAP_MODEL
+      - LLM386_EXPENSIVE_MODEL
+    volumes:
+      - llm386-cascade-store:/data
+
+  # Convenience service for poking at the store with the `llm386` CLI:
+  #
+  #   docker compose -f examples/cascade-routing/docker-compose.yml run --rm cli list-sessions --store /data/store
+  #   docker compose -f examples/cascade-routing/docker-compose.yml run --rm cli show --store /data/store <block-id>
+  cli:
+    image: llm386-cascade-demo
+    entrypoint: ["llm386"]
+    volumes:
+      - llm386-cascade-store:/data
+
+volumes:
+  llm386-cascade-store:

@@ -1,0 +1,16 @@
+# Build context excludes (Docker BuildKit picks up `<dockerfile>.dockerignore`).
+# Without these the local `target/` directory ends up in the build context
+# and slows things down by gigabytes.
+
+target/
+**/target/
+.git/
+.gitignore
+**/.DS_Store
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.venv/
+**/.env
+node_modules/
+*.log

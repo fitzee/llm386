@@ -412,6 +412,7 @@ Early. The single-node embedded library and CLI work end to end against real LMD
 - [`docs/CLI.md`](./docs/CLI.md) — full `llm386` subcommand reference with worked examples.
 - [`python/README.md`](./python/README.md) — Python SDK (PyO3 native extension), framework integration patterns, custom Python retrievers.
 - [`examples/langgraph-agent/`](./examples/langgraph-agent/) — runnable Docker tutorial: a LangGraph chatbot with two tools, using LLM386 as its memory layer. `docker compose run --rm agent` and you're chatting in 5 minutes.
+- [`examples/cascade-routing/`](./examples/cascade-routing/) — runnable Docker tutorial: cheap-first cascade routing (Haiku → escalate to Opus on low confidence), using `pack_with_plan` to re-render one selection for two models without re-paging. Demonstrates the `cache_boundary` field driving Anthropic `cache_control`.
 
 ## License
 

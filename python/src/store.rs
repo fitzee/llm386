@@ -13,9 +13,9 @@ use llm386_compress::{NoopSummarizer, TruncatingSummarizer};
 use llm386_compress_anthropic::AnthropicSummarizer;
 use llm386_core::{
     BlockId, BlockKind, BlockStore, CallId, ContentHash, ContextBlock as RustBlock, Edge,
-    EdgeKind, ModelRegistry, Packer, PageRequest, Pager, Provenance, SessionId, Summarizer,
-    Timestamp, TokenCounts, Tokenizer, TraceRecord as RustTraceRecord, TraceSink,
-    default_registry,
+    EdgeKind, ModelRegistry, PagePlan as RustPagePlan, Packer, PageRequest, Pager, Provenance,
+    SessionId, Summarizer, Timestamp, TokenCount, TokenCounts, Tokenizer,
+    TraceRecord as RustTraceRecord, TraceSink, default_registry,
 };
 use llm386_packer::SimplePacker;
 use llm386_pager::GreedyPager;
@@ -276,12 +276,6 @@ impl Store {
         if let Some(budgets) = &self.section_budgets {
             pager = pager.with_budgets(budgets.clone());
         }
-        let mut packer_options = self.packer_options.clone();
-        if timestamps {
-            packer_options.include_timestamps = true;
-        }
-        let packer =
-            SimplePacker::new(self.inner.clone(), tokenizer).with_options(packer_options);
         let request = PageRequest {
             session_id: SessionId(session),
             task: task.to_string(),
@@ -295,58 +289,67 @@ impl Store {
             .page(request.clone())
             .map_err(|e| LLM386Error::new_err(format!("page: {e}")))?;
 
-        if chat {
-            let chat_prompt = packer
-                .pack_chat(&request, &plan)
-                .map_err(|e| LLM386Error::new_err(format!("pack_chat: {e}")))?;
-            let cache_boundary = chat_prompt.cache_boundary;
-            let messages: Vec<ChatMessage> =
-                chat_prompt.messages.into_iter().map(ChatMessage::from_rust).collect();
-            let trace_id = if let Some(trace_path) = trace {
-                Some(record_trace(
-                    &trace_path,
-                    SessionId(session),
-                    &request.model.name,
-                    request.model.tokenizer.as_str(),
-                    &plan,
-                    chat_prompt.input_tokens,
-                    started_at,
-                    u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
-                )?)
-            } else {
-                None
-            };
-            Ok(PackResult {
-                rendered: None,
-                messages: Some(messages),
-                cache_boundary,
-                trace_id,
-            })
-        } else {
-            let prompt = packer
-                .pack(&request, &plan)
-                .map_err(|e| LLM386Error::new_err(format!("pack: {e}")))?;
-            let trace_id = if let Some(trace_path) = trace {
-                Some(record_trace(
-                    &trace_path,
-                    SessionId(session),
-                    &request.model.name,
-                    request.model.tokenizer.as_str(),
-                    &plan,
-                    prompt.input_tokens,
-                    started_at,
-                    u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
-                )?)
-            } else {
-                None
-            };
-            Ok(PackResult {
-                rendered: Some(prompt.rendered),
-                messages: None,
-                cache_boundary: None,
-                trace_id,
-            })
-        }
+        self.render(request, plan, tokenizer, chat, timestamps, trace, started_at, started)
+    }
+
+    /// Re-render an existing [`PagePlan`] for a (possibly different)
+    /// model — same selected blocks, new tokenizer, new model
+    /// budget, new `cache_boundary` from the new model's section
+    /// table.
+    ///
+    /// The cascade-routing pattern: `page()` once for the cheapest
+    /// model in your tier; call `pack_with_plan(plan, model=cheap)`;
+    /// if confidence is low, escalate via
+    /// `pack_with_plan(plan, model=expensive)` without re-running
+    /// retrieval.
+    ///
+    /// Note: blocks are selected against the original page request's
+    /// budget. If the new model has a *smaller* budget the re-pack
+    /// may return [`PackerError::BudgetExceeded`]; in that case
+    /// page again for the smaller model.
+    #[pyo3(signature = (plan, session, model, task, *, chat = false, timestamps = false, trace = None))]
+    fn pack_with_plan(
+        &self,
+        plan: Py<PagePlan>,
+        session: u128,
+        model: &str,
+        task: &str,
+        chat: bool,
+        timestamps: bool,
+        trace: Option<PathBuf>,
+        py: Python<'_>,
+    ) -> PyResult<PackResult> {
+        let (profile, tokenizer) = self.profile_and_tokenizer(model)?;
+        let request = PageRequest {
+            session_id: SessionId(session),
+            task: task.to_string(),
+            model: profile,
+            required_blocks: vec![],
+        };
+
+        // Reconstruct the Rust PagePlan from the Python wrapper.
+        // Only `selected` is needed for rendering — `selections`,
+        // `omitted`, and `estimated_tokens` are informational and the
+        // packer doesn't read them during pack/pack_chat.
+        let plan_ref = plan.borrow(py);
+        let selected: Result<Vec<BlockId>, _> = plan_ref
+            .selected
+            .iter()
+            .map(|s| s.parse::<BlockId>())
+            .collect();
+        let selected = selected.map_err(|e| LLM386Error::new_err(format!("invalid block id: {e}")))?;
+        let estimated_tokens = plan_ref.estimated_tokens;
+        drop(plan_ref);
+        let rust_plan = RustPagePlan {
+            selected,
+            selections: vec![],
+            omitted: vec![],
+            estimated_tokens: TokenCount(estimated_tokens),
+        };
+
+        let started_at = Timestamp(now_ms());
+        let started = Instant::now();
+        self.render(request, rust_plan, tokenizer, chat, timestamps, trace, started_at, started)
     }
 
     /// Summarize a session via the named summarizer.
@@ -473,6 +476,82 @@ impl Store {
             ))
         })?;
         Ok((profile, tokenizer))
+    }
+
+    /// Shared rendering core for `pack` and `pack_with_plan`. Builds
+    /// a `SimplePacker`, dispatches `pack` or `pack_chat`, optionally
+    /// records a trace, and packages the result for Python.
+    #[allow(clippy::too_many_arguments)] // factored from the two callers; bundling obscures the API
+    fn render(
+        &self,
+        request: PageRequest,
+        plan: RustPagePlan,
+        tokenizer: Arc<dyn Tokenizer>,
+        chat: bool,
+        timestamps: bool,
+        trace: Option<PathBuf>,
+        started_at: Timestamp,
+        started: Instant,
+    ) -> PyResult<PackResult> {
+        let mut packer_options = self.packer_options.clone();
+        if timestamps {
+            packer_options.include_timestamps = true;
+        }
+        let packer =
+            SimplePacker::new(self.inner.clone(), tokenizer).with_options(packer_options);
+
+        if chat {
+            let chat_prompt = packer
+                .pack_chat(&request, &plan)
+                .map_err(|e| LLM386Error::new_err(format!("pack_chat: {e}")))?;
+            let cache_boundary = chat_prompt.cache_boundary;
+            let messages: Vec<ChatMessage> =
+                chat_prompt.messages.into_iter().map(ChatMessage::from_rust).collect();
+            let trace_id = if let Some(trace_path) = trace {
+                Some(record_trace(
+                    &trace_path,
+                    request.session_id,
+                    &request.model.name,
+                    request.model.tokenizer.as_str(),
+                    &plan,
+                    chat_prompt.input_tokens,
+                    started_at,
+                    u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+                )?)
+            } else {
+                None
+            };
+            Ok(PackResult {
+                rendered: None,
+                messages: Some(messages),
+                cache_boundary,
+                trace_id,
+            })
+        } else {
+            let prompt = packer
+                .pack(&request, &plan)
+                .map_err(|e| LLM386Error::new_err(format!("pack: {e}")))?;
+            let trace_id = if let Some(trace_path) = trace {
+                Some(record_trace(
+                    &trace_path,
+                    request.session_id,
+                    &request.model.name,
+                    request.model.tokenizer.as_str(),
+                    &plan,
+                    prompt.input_tokens,
+                    started_at,
+                    u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX),
+                )?)
+            } else {
+                None
+            };
+            Ok(PackResult {
+                rendered: Some(prompt.rendered),
+                messages: None,
+                cache_boundary: None,
+                trace_id,
+            })
+        }
     }
 }
 

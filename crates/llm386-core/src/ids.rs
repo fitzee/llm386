@@ -4,6 +4,7 @@
 //! of host pointer width.
 
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +47,32 @@ impl fmt::Debug for BlockId {
 impl fmt::Display for BlockId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:032x}", self.0)
+    }
+}
+
+/// Error returned when a string cannot be parsed as a [`BlockId`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseBlockIdError(String);
+
+impl fmt::Display for ParseBlockIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid BlockId `{}`: expected 32 hex characters", self.0)
+    }
+}
+
+impl std::error::Error for ParseBlockIdError {}
+
+impl FromStr for BlockId {
+    type Err = ParseBlockIdError;
+
+    /// Parse a `BlockId` from its 32-hex-char [`Display`] form.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.len() != 32 {
+            return Err(ParseBlockIdError(s.to_string()));
+        }
+        u128::from_str_radix(s, 16)
+            .map(BlockId)
+            .map_err(|_| ParseBlockIdError(s.to_string()))
     }
 }
 
@@ -175,6 +202,27 @@ mod tests {
         let a = ContentHash::of(b"hello world");
         let b = ContentHash::of(b"hello WORLD");
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn block_id_roundtrips_through_string() {
+        let id = BlockId::from_parts(1_700_000_000_000, 0xdead_beef_cafe_babe_f00d);
+        let s = id.to_string();
+        assert_eq!(s.len(), 32);
+        let parsed: BlockId = s.parse().unwrap();
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn block_id_parse_rejects_wrong_length() {
+        assert!("abc".parse::<BlockId>().is_err());
+        assert!("0".repeat(31).parse::<BlockId>().is_err());
+        assert!("0".repeat(33).parse::<BlockId>().is_err());
+    }
+
+    #[test]
+    fn block_id_parse_rejects_non_hex() {
+        assert!("g".repeat(32).parse::<BlockId>().is_err());
     }
 
     #[test]

@@ -76,6 +76,37 @@ def test_pack_chat_returns_message_list(store):
     assert "user" in roles
 
 
+def test_pack_with_plan_reuses_selection_for_a_different_model(store):
+    """Cascade-routing path: page once, render twice for two models.
+
+    Same selected blocks → both prompts contain the same content.
+    Different model profiles → distinct cache_boundary values are
+    valid; we only assert the rendering itself succeeds and the
+    prompts overlap.
+    """
+    store.put(session=1, kind="system", body="be concise")
+    store.put(session=1, kind="fact", body="canberra is the capital of australia")
+    store.put(session=1, kind="user-message", body="capital question")
+
+    plan = store.page(session=1, model="gpt-4o", task="answer")
+    selected_before = list(plan.selected)
+
+    cheap = store.pack_with_plan(plan, session=1, model="gpt-4o", task="answer", chat=True)
+    expensive = store.pack_with_plan(
+        plan, session=1, model="claude-opus-4-7", task="answer", chat=True,
+    )
+
+    assert cheap.messages is not None
+    assert expensive.messages is not None
+    # Same canberra fact lands in both renderings.
+    cheap_blob = "\n".join(m.content for m in cheap.messages)
+    exp_blob = "\n".join(m.content for m in expensive.messages)
+    assert "canberra" in cheap_blob.lower()
+    assert "canberra" in exp_blob.lower()
+    # The plan is unchanged after re-use.
+    assert list(plan.selected) == selected_before
+
+
 def test_pack_with_trace_records_id(store, tmp_path):
     store.put(session=1, kind="user-message", body="x")
     trace_dir = str(tmp_path / "traces")
